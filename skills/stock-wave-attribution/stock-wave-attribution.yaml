@@ -1,0 +1,16 @@
+postgres:
+  event_news_dsn: postgresql://zhengshenghua@localhost:5432/event_news
+  event_quant_dsn: postgresql://zhengshenghua@localhost:5432/event_quant
+
+tushare:
+  token: REPLACE_WITH_TUSHARE_TOKEN
+  http_url: http://lianghua.nanyangqiankun.top
+
+paths:
+  analysis_dir: ../../docs/analysis
+  plot_dir: ../../data/plots
+  cache_dir: ../../data/stock_cache
+
+chatgpt:
+  node_bin: node
+  script_path: ../chatgpt-plus-browser/scripts/chatgpt_cdp.mjs

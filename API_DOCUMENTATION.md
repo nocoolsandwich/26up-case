@@ -1,0 +1,166 @@
+# API Documentation
+
+## 归因服务接口
+
+当前项目新增本机单用户归因服务，默认由 `uvicorn service.app:app --reload` 启动。
+
+### 1. 创建归因任务
+
+- 方法：`POST`
+- 路径：`/tasks/attribution`
+
+请求体：
+
+```json
+{
+  "stock_name": "腾景科技",
+  "ts_code": "688195.SH",
+  "start_date": "2025-09-10",
+  "end_date": "2026-03-09",
+  "sample_label": "数据中心"
+}
+```
+
+返回：
+
+```json
+{
+  "task_id": "attr-xxx",
+  "stock_name": "腾景科技",
+  "ts_code": "688195.SH",
+  "start_date": "2025-09-10",
+  "end_date": "2026-03-09",
+  "sample_label": "数据中心",
+  "status": "queued",
+  "stage": "created",
+  "report_path": "",
+  "plot_path": "",
+  "log_path": "",
+  "chatgpt_task_id": "",
+  "progress_summary": "",
+  "last_event_type": "",
+  "last_command": "",
+  "error": ""
+}
+```
+
+### 2. 查询任务状态
+
+- 方法：`GET`
+- 路径：`/tasks/{task_id}`
+
+返回任务当前状态对象。
+
+### 3. 查询任务结果
+
+- 方法：`GET`
+- 路径：`/tasks/{task_id}/result`
+
+返回：
+
+```json
+{
+  "task_id": "attr-xxx",
+  "report_path": "",
+  "plot_path": "",
+  "report_exists": false,
+  "plot_exists": false,
+  "chatgpt_task_id": ""
+}
+```
+
+补充说明：
+
+- 若任务对象本身尚未写入 `chatgpt_task_id`，服务会尝试从已生成报告的 `ChatGPT 联网归因` 小节中自动提取。
+
+### 4. 执行归因任务
+
+- 方法：`POST`
+- 路径：`/tasks/{task_id}/run`
+
+行为：
+
+- 将任务状态切到 `running`
+- 调用 `Codex App Server`
+- 由 `Codex App Server` 去驱动 `stock-wave-attribution`
+- 执行期间始终写任务日志到 `log_path`
+- 执行期间会从 `App Server` 事件流持续提炼：
+  - `progress_summary`
+  - `last_event_type`
+  - `last_command`
+- 日志里会记录每一步收到的请求和返回，包括：
+  - JSON-RPC request
+  - response
+  - notification
+  - 命令输出增量
+- 默认带超时控制；超时会返回 `failed/codex_timeout`
+- 若执行成功，自动回写：
+  - `report_path`
+  - `plot_path`
+  - `log_path`
+  - `chatgpt_task_id`（若能从报告识别）
+- 若执行失败，返回 `failed` 和错误信息
+
+成功返回示例：
+
+```json
+{
+  "task_id": "attr-xxx",
+  "stock_name": "国博电子",
+  "ts_code": "688375.SH",
+  "start_date": "2025-12-10",
+  "end_date": "2026-01-14",
+  "sample_label": "5G",
+  "status": "completed",
+  "stage": "completed",
+  "report_path": "/abs/path/docs/analysis/2026-03-25-688375SH-国博电子-wave-attribution.md",
+  "plot_path": "/abs/path/data/plots/688375_SH_wave_candles.png",
+  "log_path": "/abs/path/data/service_logs/attr-xxx.log",
+  "chatgpt_task_id": "d7b0a15f-688a-41af-b738-ec8d9ab5290a",
+  "progress_summary": "最近命令: python scripts/run.py",
+  "last_event_type": "turn/completed",
+  "last_command": "python scripts/run.py",
+  "error": ""
+}
+```
+
+超时返回示例：
+
+```json
+{
+  "task_id": "attr-xxx",
+  "status": "failed",
+  "stage": "codex_timeout",
+  "report_path": "",
+  "plot_path": "",
+  "log_path": "/abs/path/data/service_logs/attr-xxx.log",
+  "chatgpt_task_id": "",
+  "progress_summary": "最近命令: python - <<'PY'",
+  "last_event_type": "item/started",
+  "last_command": "python - <<'PY'",
+  "error": "codex app-server timed out after 30s"
+}
+```
+
+### 5. 续跑 ChatGPT 步骤
+
+- 方法：`POST`
+- 路径：`/tasks/{task_id}/retry-chatgpt`
+
+行为：
+
+- 先检查当前 ChatGPT 自动化会话状态
+- 若 `loginCheck.ok=false`，返回 `409`
+- 返回体里带明确原因，例如：
+  - `blank_page`
+  - `workspace_deactivated`
+  - `logged_out`
+  - `missing_composer`
+
+## 当前约束
+
+- 仅支持本机单用户
+- 仅支持单票归因
+- 任务状态存储在 `data/service_tasks/`
+- 执行日志存储在 `data/service_logs/`
+- 报告继续落在 `docs/analysis/`

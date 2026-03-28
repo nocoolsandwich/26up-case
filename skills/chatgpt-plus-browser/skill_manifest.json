@@ -1,0 +1,47 @@
+{
+  "skill_name": "chatgpt-plus-browser",
+  "project_priority": "project-first",
+  "runtime_owner": "skill/scripts",
+  "design_docs": [
+    "docs/plans/2026-03-16-chatgpt-plus-browser-v2-design.md",
+    "docs/plans/2026-03-16-chatgpt-plus-browser-v2-implementation.md",
+    "docs/plans/2026-03-23-chatgpt-plus-browser-autowatch-design.md",
+    "docs/plans/2026-03-23-chatgpt-plus-browser-autowatch-implementation.md"
+  ],
+  "skill_paths": [
+    "skills/chatgpt-plus-browser/scripts",
+    "skills/chatgpt-plus-browser/tests"
+  ],
+  "project_module_paths": [],
+  "runtime_files": [
+    "skills/chatgpt-plus-browser/scripts/chatgpt_cdp.mjs",
+    "skills/chatgpt-plus-browser/scripts/start_chrome.sh"
+  ],
+  "current_capabilities": [
+    "chrome cdp prompt submission",
+    "task persistence in project-local state dir",
+    "task polling and result extraction",
+    "search-mode sentinel completion",
+    "auto watcher after submit"
+  ],
+  "planned_capabilities": [
+    "structured snapshot extraction",
+    "expected_patterns",
+    "fresh session retry"
+  ],
+  "migration_boundary": {
+    "move_into_skill": [
+      "CDP browser runtime",
+      "task state polling",
+      "latest assistant extraction",
+      "result completeness assertion"
+    ],
+    "keep_in_project": [
+      "docs/plans/2026-03-16-chatgpt-plus-browser-v2-design.md",
+      "docs/plans/2026-03-16-chatgpt-plus-browser-v2-implementation.md",
+      "docs/plans/2026-03-23-chatgpt-plus-browser-autowatch-design.md",
+      "docs/plans/2026-03-23-chatgpt-plus-browser-autowatch-implementation.md"
+    ],
+    "call_project_modules": []
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "skill_name": "stock-wave-attribution",
+  "project_priority": "portable-first",
+  "runtime_owner": "skill/orchestrator",
+  "design_docs": [
+    "docs/plans/2026-03-15-stock-wave-attribution-skill-design.md",
+    "docs/plans/2026-03-15-stock-wave-attribution-skill-validation-wzxc.md",
+    "docs/plans/2026-03-22-stock-wave-attribution-portable-skill.md"
+  ],
+  "skill_paths": [
+    "skills/stock-wave-attribution/scripts",
+    "skills/stock-wave-attribution/runtime",
+    "skills/stock-wave-attribution/tests"
+  ],
+  "runtime_files": [
+    "scripts/orchestrator.py",
+    "scripts/project_skill.py",
+    "runtime/config.py",
+    "runtime/attribution_data.py",
+    "runtime/wave_segmentation.py",
+    "runtime/wave_plotting.py",
+    "templates/detailed_report_contract.md",
+    "stock-wave-attribution.yaml",
+    "SKILL.md",
+    "README.md",
+    "skill_manifest.json"
+  ],
+  "project_module_paths": [],
+  "current_capabilities": [
+    "portable orchestrator",
+    "skill-local runtime modules",
+    "config-driven postgres and tushare settings",
+    "detailed markdown report contract",
+    "report and plot file emission"
+  ],
+  "skill_dependencies": [
+    "chatgpt-plus-browser"
+  ],
+  "output_targets": [
+    "docs/analysis",
+    "data/plots"
+  ],
+  "planned_capabilities": [
+    "wave review without web search",
+    "attribution search with web search",
+    "local news evidence retrieval",
+    "concept correlation validation"
+  ],
+  "migration_boundary": {
+    "keep_in_project": [
+      "docs/analysis/"
+    ],
+    "move_into_skill": [
+      "runtime config loading",
+      "wave segmentation",
+      "wave plotting",
+      "attribution data access helpers",
+      "wave review orchestration",
+      "ChatGPT prompt templates",
+      "report assembly",
+      "output contract",
+      "default stock-wave-attribution.yaml"
+    ],
+    "call_skill_dependencies": [
+      "chatgpt-plus-browser"
+    ]
+  }
+}

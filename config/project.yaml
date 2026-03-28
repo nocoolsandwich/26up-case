@@ -1,0 +1,25 @@
+postgres:
+  event_news_dsn: postgresql://zhengshenghua@localhost:5432/event_news
+  event_quant_dsn: postgresql://zhengshenghua@localhost:5432/event_quant
+
+tushare:
+  # 仓库内不提交真实 token；本地使用时手动填充或通过外部方式注入
+  token: "REPLACE_WITH_TUSHARE_TOKEN"
+  http_url: http://lianghua.nanyangqiankun.top
+
+paths:
+  stock_file: stock.xlsx
+  marco_file: marco.xlsx
+  data_dir: data
+  backup_root: data/db_backups
+
+backup:
+  mode: local
+  pg_dump_bin: /opt/homebrew/opt/postgresql@16/bin/pg_dump
+  docker:
+    container_name: event-news-pg
+    db_user: postgres
+    db_password: postgres
+
+case:
+  sheet_name: 案例库
