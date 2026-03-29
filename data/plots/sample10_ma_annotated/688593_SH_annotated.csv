@@ -1,3 +1,0 @@
-start_idx,peak_idx,start_date,peak_date,start_price,peak_price,wave_gain_pct,bars,price_col
-26,39,2025-10-24 00:00:00,2025-11-12 00:00:00,22.21,24.77,11.526339486717685,14,close_qfq
-73,108,2025-12-30 00:00:00,2026-02-27 00:00:00,20.9,38.13,82.44019138755982,36,close_qfq
