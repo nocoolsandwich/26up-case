@@ -293,6 +293,14 @@ class StockWaveOrchestratorTest(unittest.TestCase):
                 "concept_rows": [
                     {"concept_name": "人形机器人", "concept_code": "886069.TI", "period_return_pct": "11.53%", "close_corr": "0.9439", "ret_corr": "0.4718", "interpretation": "同步性最高"}
                 ],
+                "one_line_logic": "机器人T链主线驱动，小鹏科技日点火，跨年情绪强化。",
+                "final_verdict": {
+                    "main_cause": "机器人T链 / 丝杠平台化",
+                    "alt_cause": "机器人板块跨年情绪强化",
+                    "final_judgment": "这轮主升更偏向机器人T链主线，不是泛机器人概念跟涨。",
+                    "notes": "启动与加速阶段均有本地证据支撑。",
+                    "confidence": "中高",
+                },
                 "conclusion_rows": [
                     {"dimension": "主因", "value": "机器人主线 + 跨年情绪", "confidence": "中高", "notes": "与案例颗粒度对齐"}
                 ],
@@ -305,6 +313,7 @@ class StockWaveOrchestratorTest(unittest.TestCase):
         self.assertIn("## 量价验证表", markdown)
         self.assertIn("## 概念联动验证表", markdown)
         self.assertIn("## 结论与置信度表", markdown)
+        self.assertIn("- 一句话逻辑：`机器人T链主线驱动，小鹏科技日点火，跨年情绪强化。`", markdown)
         self.assertIn("| 时间 | 事件类别 | 事件 | 对波段影响 | 来源 |", markdown)
         self.assertIn("| 波段 | 区间 | 涨幅 | 波段审查 | 主因 | 备选 |", markdown)
         self.assertIn("| 序号 | 时间 | 来源 | 标题 | 链接 |", markdown)
@@ -315,6 +324,10 @@ class StockWaveOrchestratorTest(unittest.TestCase):
         self.assertIn("| 维度 | 数值 | 证据 | 解释 |", markdown)
         self.assertIn("| 概念 | 代码 | 区间涨幅 | 收盘价相关系数 | 日收益率相关系数 | 解释 |", markdown)
         self.assertIn("| 维度 | 结论 | 置信度 | 说明 |", markdown)
+        self.assertIn("## 综合裁决", markdown)
+        self.assertIn("- 主因：`机器人T链 / 丝杠平台化`", markdown)
+        self.assertIn("- 备选：`机器人板块跨年情绪强化`", markdown)
+        self.assertIn("- 最终判定：机器人T链主线，不是泛机器人概念跟涨。", markdown)
 
     def test_orchestrator_defaults_to_local_flow_without_chatgpt(self):
         module = load_module()
@@ -415,12 +428,14 @@ class StockWaveOrchestratorTest(unittest.TestCase):
             markdown = report_path.read_text(encoding="utf-8")
             self.assertIn("## 事件时间线表", markdown)
             self.assertIn("## 结论与置信度表", markdown)
+            self.assertIn("## 综合裁决", markdown)
+            self.assertIn("- 一句话逻辑：`", markdown)
             self.assertIn("| 序号 | 时间 | 来源 | 标题 | 链接 |", markdown)
             self.assertIn("### 证据原文", markdown)
             self.assertIn("#### 证据 1", markdown)
             self.assertIn("```text", markdown)
             self.assertEqual(chatgpt_calls, [])
-            self.assertIn("待结合本地证据裁决", markdown)
+            self.assertNotIn("待结合本地证据裁决", markdown)
             self.assertIn("runtime/wave_segmentation.py", result["call_chain"])
             self.assertIn("runtime/wave_plotting.py", result["call_chain"])
             self.assertIn("runtime/attribution_data.py", result["call_chain"])

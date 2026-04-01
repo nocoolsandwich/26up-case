@@ -22,6 +22,10 @@
 - `runtime/wave_plotting.py`：K 线绘图
 - `stock-wave-attribution.yaml`：默认配置模板
 - `templates/detailed_report_contract.md`：详细表格版输出合同
+- 正式报告默认会给出：
+  - `一句话逻辑`
+  - `综合裁决`
+  - 本地证据收口后的 `主因 / 备选 / 最终判定`
 - `tests/test_orchestrator.py`：orchestrator 回归测试
 - `scripts/migrate_news_raw_text_reports.py`：历史报告 news 原文迁移脚本
   - 当前统一把 `本地 news 库证据` 渲染成两段：

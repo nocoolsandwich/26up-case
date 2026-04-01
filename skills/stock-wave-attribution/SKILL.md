@@ -69,6 +69,14 @@ python3 skills/stock-wave-attribution/scripts/project_skill.py summary --json
   - 再给逐条 `证据原文`
 - `事件时间线表` 只放精选后的摘要，不放整段原文全文
 - `证据原文` 必须用 fenced code block 原样放数据库全文，避免 Markdown 渲染器把多行原文打穿
+- 正式报告必须包含：
+  - `一句话逻辑`
+  - `综合裁决`
+- 默认本地归因链也必须直接给出：
+  - `主因`
+  - `备选`
+  - `最终判定`
+  不能再写“待结合本地证据裁决”这类占位文案
 - 当前正式报告主因、备选、时间线和结论，默认由本地 `event_news / event_quant / tushare / 概念联动验证` 收口
 - ChatGPT 链路暂时不删除，但默认关闭
 - 如需恢复 ChatGPT 补强链路，优先通过 `stock-wave-attribution.yaml` 里的 `chatgpt.enabled` 显式开启

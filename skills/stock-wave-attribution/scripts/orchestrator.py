@@ -159,6 +159,196 @@ def _format_percent(value: float | int | str) -> str:
     return f"{float(value):.2f}%"
 
 
+def _clean_theme_label(value: str) -> str:
+    text = str(value or "").strip()
+    for suffix in ("概念股", "概念", "主线", "主题"):
+        if text.endswith(suffix):
+            stripped = text[: -len(suffix)].strip()
+            if stripped:
+                return stripped
+    return text
+
+
+def _compact_catalyst_label(title: str, stock_name: str) -> str:
+    text = str(title or "").strip()
+    if stock_name:
+        text = text.replace(stock_name, "").strip(" -_:：，,")
+    return text or "启动催化"
+
+
+def _display_final_judgment(text: str) -> str:
+    sentence = str(text or "").strip()
+    for prefix in ("这轮主升更偏向", "这轮主升主要由"):
+        if sentence.startswith(prefix):
+            return sentence[len(prefix) :].strip()
+    return sentence
+
+
+def _pick_main_concept(
+    *,
+    concept_rows: list[dict[str, str]],
+    sample_label_clean: str,
+    news_corpus: str,
+) -> str:
+    best_name = ""
+    best_score = -1
+    for index, row in enumerate(concept_rows):
+        concept_name = _clean_theme_label(str(row.get("concept_name", "")))
+        if not concept_name:
+            continue
+        score = max(20 - index * 2, 0)
+        if sample_label_clean and (sample_label_clean in concept_name or concept_name in sample_label_clean):
+            score += 120
+        if concept_name and concept_name in news_corpus:
+            score += 60
+        if score > best_score:
+            best_score = score
+            best_name = concept_name
+    return best_name
+
+
+def _pick_catalyst_label(selected_news: list[dict[str, Any]], stock_name: str) -> str:
+    ordered = sorted(
+        selected_news,
+        key=lambda row: (
+            str(row.get("source_id", "")) == "wscn_live",
+            len(str(row.get("title", ""))),
+        ),
+    )
+    for row in ordered:
+        title = str(row.get("title", "")).strip()
+        raw_first_line = _summarize_timeline_impact(str(row.get("raw_text", "")))
+        candidate = raw_first_line if "..." in title or len(title) > 28 else title
+        compact = _compact_catalyst_label(candidate, stock_name)
+        if compact and len(compact) <= 18:
+            return compact
+        for needle, label in (
+            ("T链", "T链催化"),
+            ("丝杠", "丝杠催化"),
+            ("人形机器人", "人形机器人催化"),
+            ("机器人", "机器人催化"),
+            ("商业航天", "商业航天催化"),
+            ("卫星", "卫星催化"),
+            ("液冷", "液冷催化"),
+            ("算力", "算力催化"),
+            ("AIDC", "AIDC催化"),
+            ("柔性直流", "柔性直流催化"),
+            ("特高压", "特高压催化"),
+            ("空间电源", "空间电源催化"),
+            ("砷化镓", "砷化镓催化"),
+            ("CPO", "CPO催化"),
+            ("硅光", "硅光催化"),
+        ):
+            if needle in candidate:
+                return label
+    return "启动催化"
+
+
+def _build_local_verdict(
+    *,
+    case_context: dict[str, str],
+    selected_news: list[dict[str, Any]],
+    concept_rows: list[dict[str, str]],
+    quant_rows: list[dict[str, str]],
+) -> dict[str, Any]:
+    sample_label = str(case_context.get("sample_label", "")).strip()
+    sample_label_clean = _clean_theme_label(sample_label)
+    news_corpus = " ".join(
+        " ".join([str(row.get("title", "")), str(row.get("raw_text", ""))]) for row in selected_news
+    )
+
+    main_cause = _pick_main_concept(
+        concept_rows=concept_rows,
+        sample_label_clean=sample_label_clean,
+        news_corpus=news_corpus,
+    )
+    if not main_cause:
+        main_cause = sample_label_clean or sample_label or str(case_context.get("stock_name", "")).strip()
+    refinements: list[str] = []
+    for needle, label in (
+        ("T链", "T链"),
+        ("丝杠", "丝杠平台化"),
+        ("人形机器人", "人形机器人"),
+        ("机器人", "机器人"),
+        ("商业航天", "商业航天"),
+        ("卫星", "卫星互联网"),
+        ("液冷", "液冷"),
+        ("算力", "算力"),
+        ("AIDC", "AIDC"),
+        ("柔性直流", "柔性直流"),
+        ("特高压", "特高压"),
+        ("空间电源", "空间电源"),
+        ("砷化镓", "砷化镓"),
+        ("CPO", "CPO"),
+        ("硅光", "硅光"),
+    ):
+        if needle in news_corpus and label not in refinements and label != sample_label_clean and label != main_cause:
+            refinements.append(label)
+    if refinements:
+        main_parts = [main_cause, *refinements[:2]]
+        main_cause = " / ".join(dict.fromkeys(main_parts))
+
+    catalyst = _pick_catalyst_label(selected_news, str(case_context.get("stock_name", "")))
+    alt_cause = f"{sample_label_clean}板块情绪强化" if sample_label_clean else "板块情绪强化"
+    if alt_cause == main_cause and len(selected_news) > 1:
+        alt_cause = _compact_catalyst_label(
+            str(selected_news[1].get("title", "")),
+            str(case_context.get("stock_name", "")),
+        )
+    if not alt_cause:
+        alt_cause = "量价共振强化"
+
+    one_line_parts = [f"{main_cause}主线驱动"]
+    if catalyst and catalyst not in {main_cause, "启动催化"}:
+        one_line_parts.append(f"{catalyst}点火")
+    if alt_cause and alt_cause not in {main_cause, catalyst}:
+        one_line_parts.append(alt_cause if alt_cause.endswith("强化") else f"{alt_cause}强化")
+    one_line_logic = "，".join(one_line_parts).rstrip("，")
+    if one_line_logic:
+        one_line_logic = f"{one_line_logic}。"
+
+    confidence = "中高" if selected_news and concept_rows and quant_rows else "中"
+    if sample_label and sample_label_clean and sample_label_clean != main_cause:
+        final_judgment = f"这轮主升更偏向{main_cause}主线，不是泛{sample_label_clean}概念跟涨。"
+    else:
+        final_judgment = f"这轮主升主要由{main_cause}驱动。"
+    notes = "精选本地 news、量价与概念联动验证共同支撑。"
+    if catalyst and catalyst not in {main_cause, "启动催化"}:
+        notes = f"启动阶段由{catalyst}点火，精选本地 news、量价与概念联动验证共同支撑。"
+
+    conclusion_rows = [
+        {
+            "dimension": "主因",
+            "value": main_cause,
+            "confidence": confidence,
+            "notes": "概念联动与精选 news 共振验证。",
+        }
+    ]
+    if alt_cause and alt_cause != main_cause:
+        conclusion_rows.append(
+            {
+                "dimension": "备选",
+                "value": alt_cause,
+                "confidence": "中",
+                "notes": "作为辅助催化或板块情绪，不改写主因。",
+            }
+        )
+
+    return {
+        "one_line_logic": one_line_logic,
+        "main_cause": main_cause,
+        "alt_cause": alt_cause,
+        "final_verdict": {
+            "main_cause": main_cause,
+            "alt_cause": alt_cause,
+            "final_judgment": final_judgment,
+            "notes": notes,
+            "confidence": confidence,
+        },
+        "conclusion_rows": conclusion_rows,
+    }
+
+
 def build_wave_attribution_search_prompt(
     stock_name: str,
     ts_code: str,
@@ -501,6 +691,20 @@ def render_detailed_markdown(payload: dict[str, Any]) -> str:
         ["维度", "结论", "置信度", "说明"],
         [[row["dimension"], row["value"], row["confidence"], row["notes"]] for row in payload["conclusion_rows"]],
     )
+    final_verdict = payload.get("final_verdict", {})
+    final_verdict_lines = []
+    if final_verdict:
+        final_verdict_lines.extend(
+            [
+                "## 综合裁决",
+                "",
+                f"- 主因：`{final_verdict.get('main_cause', '')}`",
+                f"- 备选：`{final_verdict.get('alt_cause', '')}`",
+                f"- 最终判定：{_display_final_judgment(final_verdict.get('final_judgment', ''))}",
+                f"- 说明：{final_verdict.get('notes', '')}",
+                f"- 置信度：`{final_verdict.get('confidence', '')}`",
+            ]
+        )
 
     return f"""# {payload['stock_name']}波段归因
 
@@ -509,6 +713,7 @@ def render_detailed_markdown(payload: dict[str, Any]) -> str:
 - 标的名称：{payload['stock_name']}
 - 股票代码：`{payload['ts_code']}`
 - 分析窗口：`{payload['start_date']}` 到 `{payload['end_date']}`
+- 一句话逻辑：`{payload.get('one_line_logic', '')}`
 
 波段图：
 
@@ -537,6 +742,8 @@ def render_detailed_markdown(payload: dict[str, Any]) -> str:
 ## 结论与置信度表
 
 {conclusion_table}
+
+{chr(10).join(final_verdict_lines)}
 """
 
 
@@ -575,9 +782,27 @@ def run_stock_wave_attribution(
         style="enhanced",
     )
 
+    chatgpt_enabled = _chatgpt_enabled(use_chatgpt=use_chatgpt)
+    quant_rows = _build_quant_rows(stock_bundle)
+    concept_rows = _build_concept_rows(stock_bundle, concept_frames, concept_labels)
+    selected_news = _select_news_evidence(
+        news_evidence=news_evidence,
+        stock_name=case_context["stock_name"],
+        sample_label=case_context.get("sample_label", ""),
+        concept_labels=concept_labels,
+        waves=waves,
+        top_k=DEFAULT_EVIDENCE_NEWS_LIMIT,
+    )
+    timeline_rows = _build_timeline_rows(selected_news)
+    local_verdict = _build_local_verdict(
+        case_context=case_context,
+        selected_news=selected_news,
+        concept_rows=concept_rows,
+        quant_rows=quant_rows,
+    )
+
     wave_rows: list[dict[str, str]] = []
     conclusion_rows: list[dict[str, str]] = []
-    chatgpt_enabled = _chatgpt_enabled(use_chatgpt=use_chatgpt)
     for idx, wave in enumerate(waves, start=1):
         review = "rule_based"
         attribution_text = ""
@@ -600,8 +825,8 @@ def run_stock_wave_attribution(
                 "period": f"{wave['start_date']} -> {wave['peak_date']}",
                 "gain_pct": _format_percent(wave["wave_gain_pct"]),
                 "review": review,
-                "main_cause": _extract_label(attribution_text, "主因") or ("待结合本地证据裁决" if not chatgpt_enabled else ""),
-                "alt_cause": _extract_label(attribution_text, "备选"),
+                "main_cause": _extract_label(attribution_text, "主因") or str(local_verdict["main_cause"]),
+                "alt_cause": _extract_label(attribution_text, "备选") or str(local_verdict["alt_cause"]),
             }
         )
         if attribution_text:
@@ -614,32 +839,15 @@ def run_stock_wave_attribution(
                 }
             )
 
-    quant_rows = _build_quant_rows(stock_bundle)
-    concept_rows = _build_concept_rows(stock_bundle, concept_frames, concept_labels)
-    selected_news = _select_news_evidence(
-        news_evidence=news_evidence,
-        stock_name=case_context["stock_name"],
-        sample_label=case_context.get("sample_label", ""),
-        concept_labels=concept_labels,
-        waves=waves,
-        top_k=DEFAULT_EVIDENCE_NEWS_LIMIT,
-    )
-    timeline_rows = _build_timeline_rows(selected_news)
     if not conclusion_rows:
-        conclusion_rows.append(
-            {
-                "dimension": "综合",
-                "value": "待结合本地证据裁决",
-                "confidence": "中",
-                "notes": "ChatGPT 当前默认关闭，先以本地 news、量价和概念联动验证为准",
-            }
-        )
+        conclusion_rows = local_verdict["conclusion_rows"]
 
     report_payload = {
         "stock_name": case_context["stock_name"],
         "ts_code": case_context["ts_code"],
         "start_date": case_context["start_date"],
         "end_date": case_context["end_date"],
+        "one_line_logic": local_verdict["one_line_logic"],
         "plot_relpath": os.path.relpath(plot_meta["output_path"], start=report_dir),
         "timeline_rows": timeline_rows,
         "wave_rows": wave_rows,
@@ -647,6 +855,7 @@ def run_stock_wave_attribution(
         "quant_rows": quant_rows,
         "concept_rows": concept_rows,
         "conclusion_rows": conclusion_rows,
+        "final_verdict": local_verdict["final_verdict"],
     }
     markdown = render_detailed_markdown(report_payload)
 
