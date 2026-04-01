@@ -20,6 +20,12 @@
 ```bash
 python3 skills/stock-wave-attribution/scripts/orchestrator.py deps
 python3 skills/stock-wave-attribution/scripts/orchestrator.py contract-path
+python3 skills/stock-wave-attribution/scripts/orchestrator.py run \
+  --stock-name 五洲新春 \
+  --ts-code 603667.SH \
+  --start-date 2025-11-05 \
+  --end-date 2026-01-22 \
+  --sample-label 机器人概念
 ```
 
 默认配置入口：
@@ -37,7 +43,7 @@ python3 skills/stock-wave-attribution/scripts/project_skill.py summary --json
 ## 核心迁移口径
 
 - 波段切分、绘图、量价验证辅助函数一起进入 skill runtime
-- 波段审查与归因编排全部收口为本地数据库与规则链路
+- 波段审查与归因编排默认收口为本地数据库与规则链路
 - 报告继续输出到 `docs/analysis/`
 - 配图继续输出到 `data/plots/`
 - PostgreSQL 与 `tushare` 配置默认从 `stock-wave-attribution.yaml` 读取
@@ -47,20 +53,34 @@ python3 skills/stock-wave-attribution/scripts/project_skill.py summary --json
 ## 特别规则
 
 - 数据源恢复、news 检索、概念验证优先复用 skill runtime 与宿主数据库资产
-- `本地 news 库证据` 章节默认直接写数据库原文，不再写“完整摘要/正文要点”
+- `本地 news 库证据` 先做候选召回，再做精排，不允许把命中的全部 news 直接写进报告
+- news 候选来源至少覆盖：
+  - `zsxq_zhuwang`
+  - `zsxq_damao`
+  - `zsxq_saidao_touyan`
+  - `wscn_live`
+- 精排默认优先：
+  - 离波段启动日更近的消息
+  - 直接提到标的的消息
+  - 与样本标签/核心概念强相关的标题与正文
+  - 去重后的高价值消息
 - `本地 news 库证据` 章节固定拆成两段：
   - 先给元信息表：`序号 / 时间 / 来源 / 标题 / 链接`
   - 再给逐条 `证据原文`
+- `事件时间线表` 只放精选后的摘要，不放整段原文全文
 - `证据原文` 必须用 fenced code block 原样放数据库全文，避免 Markdown 渲染器把多行原文打穿
-- 当前正式报告主因、备选、时间线和结论，统一由本地 `event_news / event_quant / tushare / 概念联动验证` 收口
-- 默认不要在 skill 主流程里发起 ChatGPT 联网搜索或浏览器自动化
-- 如果后续要恢复外部搜索能力，应作为独立补强链路接回，不再写入本 skill 的默认执行步骤
+- 当前正式报告主因、备选、时间线和结论，默认由本地 `event_news / event_quant / tushare / 概念联动验证` 收口
+- ChatGPT 链路暂时不删除，但默认关闭
+- 如需恢复 ChatGPT 补强链路，优先通过 `stock-wave-attribution.yaml` 里的 `chatgpt.enabled` 显式开启
+- ChatGPT 开启后，才把 `chatgpt-plus-browser` 视为当前执行链的一部分
 
 ## 当前真实调用链
 
 1. `runtime/wave_segmentation.py`
 2. `runtime/wave_plotting.py`
 3. `runtime/attribution_data.py`
+4. `skills/chatgpt-plus-browser/scripts/chatgpt_cdp.mjs`
+   - 仅当 `chatgpt.enabled = true` 时启用
 
 当前 orchestrator 文件：
 
@@ -76,5 +96,5 @@ python3 skills/stock-wave-attribution/scripts/project_skill.py summary --json
 
 ## 下一步
 
-1. 把本地 news / 概念数据读取正式接到数据库层
-2. 再做真实样本端到端回归
+1. 继续做真实样本端到端回归
+2. 再补量化数据 provider 灾备链

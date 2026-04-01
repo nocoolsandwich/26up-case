@@ -71,6 +71,7 @@
 
 补充说明：
 
+- `plot_path` 优先以正式报告中的图片引用为准；只有报告里没有图片引用时，才退回固定命名规则。
 - 若任务对象本身尚未写入 `chatgpt_task_id`，服务会尝试从已生成报告的 `ChatGPT 联网归因` 小节中自动提取。
 
 ### 4. 执行归因任务
@@ -83,6 +84,14 @@
 - 将任务状态切到 `running`
 - 调用 `Codex App Server`
 - 由 `Codex App Server` 去驱动 `stock-wave-attribution`
+- 当前默认不是开放式探索，而是直接要求 `Codex` 执行：
+  - `python skills/stock-wave-attribution/scripts/orchestrator.py run --stock-name ... --ts-code ... --start-date ... --end-date ... --sample-label ...`
+- `codex app-server` 子进程默认优先注入本机代理：
+  - `HTTP_PROXY=http://127.0.0.1:7897`
+  - `HTTPS_PROXY=http://127.0.0.1:7897`
+  - `ALL_PROXY=http://127.0.0.1:7897`
+  - `NO_PROXY=localhost,127.0.0.1`
+- 如果服务启动环境里已经显式设置同名代理变量，默认保留显式值，不强行覆盖
 - 执行期间始终写任务日志到 `log_path`
 - 执行期间会从 `App Server` 事件流持续提炼：
   - `progress_summary`
@@ -93,7 +102,9 @@
   - response
   - notification
   - 命令输出增量
+  - 代理环境摘要（`[proxy_env]`）
 - 默认带超时控制；超时会返回 `failed/codex_timeout`
+- 若事件流里提前出现 `stream_error`，会直接返回 `failed/codex_stream_error`
 - 若执行成功，自动回写：
   - `report_path`
   - `plot_path`
@@ -139,6 +150,24 @@
   "last_event_type": "item/started",
   "last_command": "python - <<'PY'",
   "error": "codex app-server timed out after 30s"
+}
+```
+
+流错误返回示例：
+
+```json
+{
+  "task_id": "attr-xxx",
+  "status": "failed",
+  "stage": "codex_stream_error",
+  "report_path": "",
+  "plot_path": "",
+  "log_path": "/abs/path/data/service_logs/attr-xxx.log",
+  "chatgpt_task_id": "",
+  "progress_summary": "最近事件: stream_error",
+  "last_event_type": "stream_error",
+  "last_command": "",
+  "error": "stream disconnected before completion: failed to lookup address information"
 }
 ```
 

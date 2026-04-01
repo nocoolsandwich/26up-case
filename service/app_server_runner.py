@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import select
 import shlex
 import subprocess
 import time
 from pathlib import Path
 
-from service.codex_runner import WORKSPACE_ROOT, DEFAULT_CODEX_TIMEOUT_SECONDS, build_codex_prompt
+from service.codex_runner import (
+    WORKSPACE_ROOT,
+    DEFAULT_CODEX_TIMEOUT_SECONDS,
+    build_codex_base_instructions,
+    build_codex_developer_instructions,
+    build_codex_prompt,
+)
 from service.models import AttributionTask, TaskStatus
 from service.result_locator import locate_task_result
 from service.task_store import TaskStore
@@ -28,6 +35,17 @@ NOISY_NOTIFICATION_METHODS = {
 
 def build_app_server_command() -> list[str]:
     return ["codex", "app-server"]
+
+
+def build_app_server_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
+    env = dict(base_env or os.environ)
+    proxy_url = "http://127.0.0.1:7897"
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        env.setdefault(key, proxy_url)
+    no_proxy_value = "localhost,127.0.0.1"
+    for key in ("NO_PROXY", "no_proxy"):
+        env.setdefault(key, no_proxy_value)
+    return env
 
 
 def _log_path(task_id: str, workspace_root: Path) -> Path:
@@ -150,6 +168,14 @@ def _handle_notification(
                 state["last_event_type"] = "exec_command_begin"
                 _update_progress(task_store, task_id, state, stage="command_execution")
                 return None
+            if inner_type == "stream_error":
+                state["last_event_type"] = "stream_error"
+                state["progress_summary"] = "最近事件: stream_error"
+                details = str(inner.get("additional_details", "")).strip()
+                message_text = str(inner.get("message", "")).strip()
+                error_text = details or message_text or "codex stream disconnected"
+                _update_progress(task_store, task_id, state)
+                return {"status": "failed", "error": error_text, "stage": "codex_stream_error"}
             if method not in NOISY_NOTIFICATION_METHODS and inner_type:
                 state["last_event_type"] = inner_type
     elif method not in NOISY_NOTIFICATION_METHODS:
@@ -269,6 +295,7 @@ def run_app_server_task(
     command = build_app_server_command()
     process = None
     try:
+        env = build_app_server_env()
         process = process_factory(
             command,
             stdin=subprocess.PIPE,
@@ -276,8 +303,25 @@ def run_app_server_task(
             stderr=subprocess.PIPE,
             text=True,
             cwd=str(root),
+            env=env,
         )
         _append_log(log_path, "[command]", " ".join(command))
+        _append_log(
+            log_path,
+            "[proxy_env]",
+            json.dumps(
+                {
+                    key: env.get(key, "")
+                    for key in (
+                        "HTTP_PROXY",
+                        "HTTPS_PROXY",
+                        "ALL_PROXY",
+                        "NO_PROXY",
+                    )
+                },
+                ensure_ascii=False,
+            ),
+        )
         deadline = monotonic() + timeout_seconds
 
         request_id = 1
@@ -322,8 +366,8 @@ def run_app_server_task(
                     "approvalPolicy": "never",
                     "sandbox": "danger-full-access",
                     "config": None,
-                    "baseInstructions": None,
-                    "developerInstructions": None,
+                    "baseInstructions": build_codex_base_instructions(),
+                    "developerInstructions": build_codex_developer_instructions(),
                     "compactPrompt": None,
                     "includeApplyPatchTool": True,
                 },
@@ -426,7 +470,7 @@ def run_app_server_task(
             return task_store.update_task(
                 task.task_id,
                 status=TaskStatus.FAILED,
-                stage="codex_failed",
+                stage=turn_result.get("stage", "codex_failed"),
                 error=turn_result["error"],
                 log_path=str(log_path),
                 progress_summary=state["progress_summary"],

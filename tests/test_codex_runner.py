@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from subprocess import CalledProcessError, TimeoutExpired
 
-from service.codex_runner import build_codex_command, build_codex_prompt, run_codex_task
+from service.codex_runner import build_codex_command, build_codex_prompt, build_skill_run_command, run_codex_task
 from service.models import AttributionTask, TaskStatus
 from service.task_store import TaskStore
 
@@ -24,6 +24,9 @@ def test_build_codex_prompt_contains_skill_and_task_context() -> None:
     assert "2025-09-10" in prompt
     assert "2026-03-09" in prompt
     assert "docs/analysis" in prompt
+    assert "直接在项目根目录执行下面这条命令" in prompt
+    assert "python skills/stock-wave-attribution/scripts/orchestrator.py run" in prompt
+    assert "当前默认不启用 ChatGPT 补强链路" in prompt
 
 
 def test_build_codex_command_wraps_prompt_for_codex_cli() -> None:
@@ -45,6 +48,24 @@ def test_build_codex_command_wraps_prompt_for_codex_cli() -> None:
     assert "--skip-git-repo-check" in command
     assert "--dangerously-bypass-approvals-and-sandbox" in command
     assert any("国博电子" in part for part in command)
+
+
+def test_build_skill_run_command_uses_direct_orchestrator_entry() -> None:
+    task = AttributionTask(
+        task_id="attr-004c",
+        stock_name="五洲新春",
+        ts_code="603667.SH",
+        start_date="2025-11-05",
+        end_date="2026-01-22",
+        sample_label="机器人概念",
+    )
+
+    command = build_skill_run_command(task)
+
+    assert "python" in command
+    assert "skills/stock-wave-attribution/scripts/orchestrator.py" in command
+    assert "--stock-name" in command
+    assert "五洲新春" in command
 
 
 def test_run_codex_task_marks_completed_on_success(tmp_path) -> None:

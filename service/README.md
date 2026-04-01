@@ -50,6 +50,24 @@ uvicorn service.app:app --reload
 ## 当前执行口径
 
 - `/tasks/{task_id}/run` 通过 `Codex App Server` 驱动 `stock-wave-attribution`
+- 服务 prompt 默认不是让 Codex 自己探索仓库，而是直接执行：
+
+```bash
+python skills/stock-wave-attribution/scripts/orchestrator.py run \
+  --stock-name <名称> \
+  --ts-code <代码> \
+  --start-date <开始日期> \
+  --end-date <结束日期> \
+  --sample-label <标签>
+```
+
+- App Server 会话会显式注入收敛后的 `baseInstructions / developerInstructions`
+  - 默认禁止先做无关 skill 阅读和全仓库扫描
+  - 默认只允许先读 `orchestrator.py`、`scripts/attribution_data.py`、`scripts/wave_segmentation.py`、`scripts/wave_plotting.py`
+- `codex app-server` 子进程默认优先走本机代理 `http://127.0.0.1:7897`
+  - 默认注入：`HTTP_PROXY / HTTPS_PROXY / ALL_PROXY`
+  - 同时注入：`NO_PROXY=localhost,127.0.0.1`
+  - 如果外部已经显式设置这些代理环境变量，服务不会覆盖
 - 任务运行期间始终写 `log_path`
 - 默认有超时控制；超时会回写 `failed / codex_timeout / error / log_path`
 - 任务执行期间会从 `App Server` 事件流持续提炼：
@@ -61,9 +79,11 @@ uvicorn service.app:app --reload
   - 收到的 response
   - 收到的 notification
   - 命令输出增量
+  - 当前生效的代理环境摘要（`[proxy_env]`）
 - 任务成功后，服务会自动扫描归因产物并回写：
   - `report_path`
   - `plot_path`
   - `log_path`
   - `chatgpt_task_id`
+- `plot_path` 以正式报告里的图片引用为优先真相源；只有报告里没有图片引用时，才退回固定命名规则
 - `chatgpt_task_id` 优先读取任务对象；为空时，再尝试从报告中的 `.state/<task-id>.json` 路径提取

@@ -1,6 +1,6 @@
 postgres:
-  event_news_dsn: postgresql://zhengshenghua@localhost:5432/event_news
-  event_quant_dsn: postgresql://zhengshenghua@localhost:5432/event_quant
+  event_news_dsn: postgresql://postgres:postgres@localhost:5432/event_news
+  event_quant_dsn: postgresql://postgres:postgres@localhost:5432/event_quant
 
 tushare:
   # 仓库内不提交真实 token；本地使用时手动填充或通过外部方式注入

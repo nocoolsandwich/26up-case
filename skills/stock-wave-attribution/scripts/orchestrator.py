@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -27,12 +28,13 @@ CHATGPT_BROWSER_SCRIPT = Path(DEFAULT_CONFIG["chatgpt"]["script_path"])
 REPORT_CONTRACT_PATH = SKILL_ROOT / "templates" / "detailed_report_contract.md"
 DEFAULT_ANALYSIS_DIR = Path(DEFAULT_CONFIG["paths"]["analysis_dir"])
 DEFAULT_PLOT_DIR = Path(DEFAULT_CONFIG["paths"]["plot_dir"])
-CALL_CHAIN = [
+LOCAL_CALL_CHAIN = [
     "runtime/wave_segmentation.py",
     "runtime/wave_plotting.py",
     "runtime/attribution_data.py",
-    "skills/chatgpt-plus-browser/scripts/chatgpt_cdp.mjs",
 ]
+CHATGPT_CALL_CHAIN = ["skills/chatgpt-plus-browser/scripts/chatgpt_cdp.mjs"]
+CALL_CHAIN = LOCAL_CALL_CHAIN + CHATGPT_CALL_CHAIN
 
 
 def _require_pandas():
@@ -50,6 +52,24 @@ def _build_validation_table(*args, **kwargs):
     from runtime.attribution_data import build_validation_table
 
     return build_validation_table(*args, **kwargs)
+
+
+def _fetch_stock_window_bundle(*args, **kwargs):
+    from runtime.attribution_data import fetch_stock_window_bundle
+
+    return fetch_stock_window_bundle(*args, **kwargs)
+
+
+def _fetch_stock_concept_frames(*args, **kwargs):
+    from runtime.attribution_data import fetch_stock_concept_frames
+
+    return fetch_stock_concept_frames(*args, **kwargs)
+
+
+def _fetch_news_evidence(*args, **kwargs):
+    from runtime.attribution_data import fetch_news_evidence
+
+    return fetch_news_evidence(*args, **kwargs)
 
 
 def _segment_ma_trend_waves(*args, **kwargs):
@@ -186,21 +206,190 @@ def _extract_label(text: str, label: str) -> str:
     return ""
 
 
-def _resolve_output_paths(output_root: Path | None) -> tuple[Path, Path]:
+def _resolve_output_paths(
+    output_root: Path | None,
+    analysis_dir: Path | None = None,
+    plot_dir: Path | None = None,
+) -> tuple[Path, Path]:
+    if analysis_dir is not None and plot_dir is not None:
+        return analysis_dir, plot_dir
     if output_root is None:
         return DEFAULT_ANALYSIS_DIR, DEFAULT_PLOT_DIR
     return output_root / "docs" / "analysis", output_root / "data" / "plots"
 
 
+def _build_news_keywords(
+    stock_name: str,
+    sample_label: str,
+    concept_labels: dict[str, dict[str, str]] | None = None,
+) -> list[str]:
+    concept_labels = concept_labels or {}
+    raw_terms = [stock_name, sample_label, *[item.get("name", "") for item in concept_labels.values()]]
+    variants: list[str] = []
+    for term in raw_terms:
+        text = str(term).strip()
+        if not text:
+            continue
+        variants.append(text)
+        for suffix in ("概念", "概念股", "主题", "主线"):
+            if text.endswith(suffix):
+                trimmed = text[: -len(suffix)].strip()
+                if trimmed:
+                    variants.append(trimmed)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in variants:
+        if item and item not in seen:
+            seen.add(item)
+            deduped.append(item)
+    return deduped
+
+
+def _chatgpt_enabled(use_chatgpt: bool | None = None) -> bool:
+    if use_chatgpt is not None:
+        return use_chatgpt
+    return bool(DEFAULT_CONFIG.get("chatgpt", {}).get("enabled", False))
+
+
+DEFAULT_TIMELINE_NEWS_LIMIT = 10
+DEFAULT_EVIDENCE_NEWS_LIMIT = 6
+SOURCE_PRIORITY = {
+    "zsxq_saidao_touyan": 4,
+    "zsxq_damao": 3,
+    "zsxq_zhuwang": 3,
+    "wscn_live": 1,
+}
+
+
+def _summarize_timeline_impact(raw_text: str) -> str:
+    text = str(raw_text or "")
+    for line in text.splitlines():
+        summary = line.strip()
+        if summary:
+            return summary
+    return ""
+
+
+def _normalize_news_key(row: dict[str, Any]) -> tuple[str, str]:
+    title = " ".join(str(row.get("title", "")).split())
+    summary = _summarize_timeline_impact(str(row.get("raw_text", "")))
+    return title, summary
+
+
+def _collect_news_terms(
+    stock_name: str,
+    sample_label: str,
+    concept_labels: dict[str, dict[str, str]] | None = None,
+) -> list[str]:
+    return _build_news_keywords(stock_name, sample_label, concept_labels)
+
+
+def _anchor_dates_from_waves(waves: list[dict[str, Any]]) -> list[pd.Timestamp]:
+    anchors: list[pd.Timestamp] = []
+    for wave in waves:
+        start_date = wave.get("start_date")
+        if start_date:
+            anchors.append(_to_naive_timestamp(start_date))
+    return anchors
+
+
+def _to_naive_timestamp(value: Any) -> pd.Timestamp:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is not None:
+        return timestamp.tz_localize(None)
+    return timestamp
+
+
+def _news_distance_score(published_at: pd.Timestamp, anchors: list[pd.Timestamp]) -> tuple[int, int]:
+    if not anchors:
+        return 0, 9999
+    days = min(abs((published_at.normalize() - anchor.normalize()).days) for anchor in anchors)
+    if days <= 1:
+        return 40, days
+    if days <= 3:
+        return 28, days
+    if days <= 7:
+        return 18, days
+    if days <= 14:
+        return 10, days
+    if days <= 30:
+        return 4, days
+    return 0, days
+
+
+def _score_news_row(
+    row: dict[str, Any],
+    *,
+    stock_name: str,
+    sample_label: str,
+    concept_labels: dict[str, dict[str, str]] | None,
+    anchors: list[pd.Timestamp],
+) -> tuple[int, int, pd.Timestamp]:
+    title = str(row.get("title", ""))
+    raw_text = str(row.get("raw_text", ""))
+    published_at = _to_naive_timestamp(row.get("published_at"))
+    source_id = str(row.get("source_id", ""))
+    terms = _collect_news_terms(stock_name, sample_label, concept_labels)
+
+    score = SOURCE_PRIORITY.get(source_id, 0)
+    if stock_name and stock_name in title:
+        score += 80
+    elif stock_name and stock_name in raw_text:
+        score += 40
+
+    title_hits = sum(1 for term in terms if term and term != stock_name and term in title)
+    body_hits = sum(1 for term in terms if term and term != stock_name and term in raw_text)
+    score += title_hits * 12
+    score += body_hits * 4
+
+    distance_score, distance_days = _news_distance_score(published_at, anchors)
+    score += distance_score
+    return score, distance_days, published_at
+
+
+def _select_news_evidence(
+    *,
+    news_evidence: list[dict[str, Any]],
+    stock_name: str,
+    sample_label: str,
+    concept_labels: dict[str, dict[str, str]] | None,
+    waves: list[dict[str, Any]],
+    top_k: int = DEFAULT_EVIDENCE_NEWS_LIMIT,
+) -> list[dict[str, Any]]:
+    anchors = _anchor_dates_from_waves(waves)
+    best_by_key: dict[tuple[str, str], tuple[tuple[int, int, pd.Timestamp], dict[str, Any]]] = {}
+    for row in news_evidence:
+        score_tuple = _score_news_row(
+            row,
+            stock_name=stock_name,
+            sample_label=sample_label,
+            concept_labels=concept_labels,
+            anchors=anchors,
+        )
+        key = _normalize_news_key(row)
+        current = best_by_key.get(key)
+        score_key = (-score_tuple[0], score_tuple[1], score_tuple[2])
+        current_key = None if current is None else (-current[0][0], current[0][1], current[0][2])
+        if current is None or score_key < current_key:
+            best_by_key[key] = (score_tuple, row)
+
+    ranked = sorted(
+        (item for item in best_by_key.values()),
+        key=lambda item: (-item[0][0], item[0][1], item[0][2]),
+    )
+    return [row for _, row in ranked[:top_k]]
+
+
 def _build_timeline_rows(news_evidence: list[dict[str, Any]]) -> list[dict[str, str]]:
     rows = []
-    for row in news_evidence:
+    ordered = sorted(news_evidence, key=lambda row: _to_naive_timestamp(row.get("published_at")))
+    for row in ordered[:DEFAULT_TIMELINE_NEWS_LIMIT]:
         rows.append(
             {
                 "time": str(row.get("published_at", "")),
                 "category": "本地证据",
                 "event": str(row.get("title", "")),
-                "impact": str(row.get("raw_text", "")),
+                "impact": _summarize_timeline_impact(str(row.get("raw_text", ""))),
                 "source": str(row.get("source_id", "")),
             }
         )
@@ -358,12 +547,15 @@ def run_stock_wave_attribution(
     concept_frames: dict[str, pd.DataFrame],
     concept_labels: dict[str, dict[str, str]] | None = None,
     output_root: Path | None = None,
+    analysis_dir: Path | None = None,
+    plot_dir: Path | None = None,
     segmenter: Callable[[pd.DataFrame], list[dict[str, Any]]] | None = None,
     plotter: Callable[..., dict[str, Any]] = _default_plotter,
     chatgpt_runner: Callable[..., str] = run_chatgpt_browser,
+    use_chatgpt: bool | None = None,
 ) -> dict[str, Any]:
     _require_pandas()
-    report_dir, plot_dir = _resolve_output_paths(output_root)
+    report_dir, plot_dir = _resolve_output_paths(output_root, analysis_dir=analysis_dir, plot_dir=plot_dir)
     stock_df = stock_bundle["raw_stock_daily_qfq"].copy()
     stock_df["trade_date"] = pd.to_datetime(stock_df["trade_date"])
     stock_df = stock_df.sort_values("trade_date").reset_index(drop=True)
@@ -385,15 +577,18 @@ def run_stock_wave_attribution(
 
     wave_rows: list[dict[str, str]] = []
     conclusion_rows: list[dict[str, str]] = []
+    chatgpt_enabled = _chatgpt_enabled(use_chatgpt=use_chatgpt)
     for idx, wave in enumerate(waves, start=1):
-        review_prompt = (
-            f"请审查波段 W{idx} 是否属于有效主升段，只返回 up_valid/down_valid/noise/merge_adjacent。\n"
-            f"区间：{wave['start_date']} -> {wave['peak_date']}，涨幅：{float(wave['wave_gain_pct']):.2f}%"
-        )
-        review_text = chatgpt_runner(review_prompt, mode="plain")
-        review = _review_decision(review_text)
+        review = "rule_based"
         attribution_text = ""
-        if review in {"up_valid", "down_valid"}:
+        if chatgpt_enabled:
+            review_prompt = (
+                f"请审查波段 W{idx} 是否属于有效主升段，只返回 up_valid/down_valid/noise/merge_adjacent。\n"
+                f"区间：{wave['start_date']} -> {wave['peak_date']}，涨幅：{float(wave['wave_gain_pct']):.2f}%"
+            )
+            review_text = chatgpt_runner(review_prompt, mode="plain")
+            review = _review_decision(review_text)
+        if chatgpt_enabled and review in {"up_valid", "down_valid"}:
             attribution_prompt = (
                 f"请分析波段 W{idx} 在 {wave['start_date']} 到 {wave['peak_date']} 的主因、备选和搜索依据。"
             )
@@ -405,7 +600,7 @@ def run_stock_wave_attribution(
                 "period": f"{wave['start_date']} -> {wave['peak_date']}",
                 "gain_pct": _format_percent(wave["wave_gain_pct"]),
                 "review": review,
-                "main_cause": _extract_label(attribution_text, "主因"),
+                "main_cause": _extract_label(attribution_text, "主因") or ("待结合本地证据裁决" if not chatgpt_enabled else ""),
                 "alt_cause": _extract_label(attribution_text, "备选"),
             }
         )
@@ -421,9 +616,24 @@ def run_stock_wave_attribution(
 
     quant_rows = _build_quant_rows(stock_bundle)
     concept_rows = _build_concept_rows(stock_bundle, concept_frames, concept_labels)
-    timeline_rows = _build_timeline_rows(news_evidence)
+    selected_news = _select_news_evidence(
+        news_evidence=news_evidence,
+        stock_name=case_context["stock_name"],
+        sample_label=case_context.get("sample_label", ""),
+        concept_labels=concept_labels,
+        waves=waves,
+        top_k=DEFAULT_EVIDENCE_NEWS_LIMIT,
+    )
+    timeline_rows = _build_timeline_rows(selected_news)
     if not conclusion_rows:
-        conclusion_rows.append({"dimension": "综合", "value": "待补充", "confidence": "中", "notes": "尚未形成有效归因"})
+        conclusion_rows.append(
+            {
+                "dimension": "综合",
+                "value": "待结合本地证据裁决",
+                "confidence": "中",
+                "notes": "ChatGPT 当前默认关闭，先以本地 news、量价和概念联动验证为准",
+            }
+        )
 
     report_payload = {
         "stock_name": case_context["stock_name"],
@@ -433,7 +643,7 @@ def run_stock_wave_attribution(
         "plot_relpath": os.path.relpath(plot_meta["output_path"], start=report_dir),
         "timeline_rows": timeline_rows,
         "wave_rows": wave_rows,
-        "news_rows": news_evidence,
+        "news_rows": selected_news,
         "quant_rows": quant_rows,
         "concept_rows": concept_rows,
         "conclusion_rows": conclusion_rows,
@@ -450,9 +660,69 @@ def run_stock_wave_attribution(
         "report_path": str(report_path),
         "plot_path": str(plot_meta["output_path"]),
         "report_contract_path": str(REPORT_CONTRACT_PATH),
-        "call_chain": CALL_CHAIN,
+        "call_chain": LOCAL_CALL_CHAIN + (CHATGPT_CALL_CHAIN if chatgpt_enabled else []),
         "wave_count": len(wave_rows),
     }
+
+
+def run_local_attribution_task(
+    *,
+    stock_name: str,
+    ts_code: str,
+    start_date: str,
+    end_date: str,
+    sample_label: str,
+    config_path: str | Path | None = None,
+    db_connect: Callable[..., Any] | None = None,
+    stock_bundle_fetcher: Callable[..., dict[str, pd.DataFrame]] = _fetch_stock_window_bundle,
+    concept_fetcher: Callable[..., tuple[dict[str, pd.DataFrame], dict[str, dict[str, str]]]] = _fetch_stock_concept_frames,
+    news_fetcher: Callable[..., list[dict[str, Any]]] = _fetch_news_evidence,
+    attribution_runner: Callable[..., dict[str, Any]] = run_stock_wave_attribution,
+) -> dict[str, Any]:
+    runtime = load_skill_config(config_path)
+    if db_connect is None:
+        import psycopg
+
+        db_connect = psycopg.connect
+
+    with db_connect(runtime["postgres"]["event_quant_dsn"]) as quant_conn:
+        stock_bundle = stock_bundle_fetcher(quant_conn, ts_code, start_date, end_date)
+        stock_daily = stock_bundle.get("raw_stock_daily_qfq")
+        if stock_daily is None or stock_daily.empty:
+            raise ValueError(f"未获取到 {ts_code} 在 {start_date} 到 {end_date} 的量价数据")
+        concept_frames, concept_labels = concept_fetcher(quant_conn, ts_code, start_date, end_date)
+
+    keywords = _build_news_keywords(stock_name, sample_label, concept_labels)
+    with db_connect(runtime["postgres"]["event_news_dsn"]) as news_conn:
+        news_evidence = news_fetcher(news_conn, start_date, end_date, keywords)
+
+    return attribution_runner(
+        case_context={
+            "stock_name": stock_name,
+            "ts_code": ts_code,
+            "start_date": start_date,
+            "end_date": end_date,
+            "sample_label": sample_label,
+        },
+        stock_bundle=stock_bundle,
+        news_evidence=news_evidence,
+        concept_frames=concept_frames,
+        concept_labels=concept_labels,
+        analysis_dir=Path(runtime["paths"]["analysis_dir"]),
+        plot_dir=Path(runtime["paths"]["plot_dir"]),
+        use_chatgpt=bool(runtime.get("chatgpt", {}).get("enabled", False)),
+    )
+
+
+def _build_run_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="orchestrator.py run")
+    parser.add_argument("--stock-name", required=True)
+    parser.add_argument("--ts-code", required=True)
+    parser.add_argument("--start-date", required=True)
+    parser.add_argument("--end-date", required=True)
+    parser.add_argument("--sample-label", required=True)
+    parser.add_argument("--config", default=None)
+    return parser
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -462,6 +732,7 @@ def main(argv: list[str] | None = None) -> int:
             "Usage:\n"
             "  orchestrator.py deps\n"
             "  orchestrator.py contract-path\n"
+            "  orchestrator.py run --stock-name 名称 --ts-code 代码 --start-date YYYY-MM-DD --end-date YYYY-MM-DD --sample-label 标签 [--config 路径]\n"
         )
         return 0
     if argv[0] == "deps":
@@ -469,6 +740,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if argv[0] == "contract-path":
         print(str(REPORT_CONTRACT_PATH))
+        return 0
+    if argv[0] == "run":
+        parser = _build_run_parser()
+        args = parser.parse_args(argv[1:])
+        result = run_local_attribution_task(
+            stock_name=args.stock_name,
+            ts_code=args.ts_code,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            sample_label=args.sample_label,
+            config_path=args.config,
+        )
+        print(json.dumps(result, ensure_ascii=False))
         return 0
     raise SystemExit(f"Unknown command: {argv[0]}")
 

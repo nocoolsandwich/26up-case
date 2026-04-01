@@ -1,8 +1,10 @@
 import importlib.util
+import io
 import json
 import tempfile
 import types
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import pandas as pd
@@ -22,6 +24,190 @@ def load_module():
 
 
 class StockWaveOrchestratorTest(unittest.TestCase):
+    def test_build_timeline_rows_uses_brief_impact_summary_instead_of_full_raw_text(self):
+        module = load_module()
+
+        rows = module._build_timeline_rows(
+            [
+                {
+                    "published_at": "2025-11-05 19:37",
+                    "source_id": "zsxq_zhuwang",
+                    "title": "小鹏科技日",
+                    "raw_text": "第一段影响说明。\n第二段很长的补充细节。\n第三段继续展开。",
+                }
+            ]
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["time"], "2025-11-05 19:37")
+        self.assertEqual(rows[0]["event"], "小鹏科技日")
+        self.assertEqual(rows[0]["source"], "zsxq_zhuwang")
+        self.assertEqual(rows[0]["impact"], "第一段影响说明。")
+        self.assertNotIn("第二段很长的补充细节", rows[0]["impact"])
+
+    def test_select_news_evidence_prefers_wave_start_proximity_and_deduplicates(self):
+        module = load_module()
+
+        selected = module._select_news_evidence(
+            news_evidence=[
+                {
+                    "published_at": "2025-11-27 08:00",
+                    "source_id": "zsxq_saidao_touyan",
+                    "title": "五洲新春切入机器人丝杠",
+                    "raw_text": "五洲新春与机器人丝杠主线直接相关。",
+                    "url": "https://example.com/1",
+                },
+                {
+                    "published_at": "2025-12-28 09:00",
+                    "source_id": "wscn_live",
+                    "title": "机器人板块回暖",
+                    "raw_text": "机器人板块回暖，但未直接提到五洲新春。",
+                    "url": "https://example.com/2",
+                },
+                {
+                    "published_at": "2025-11-28 10:00",
+                    "source_id": "zsxq_damao",
+                    "title": "五洲新春切入机器人丝杠",
+                    "raw_text": "五洲新春与机器人丝杠主线直接相关。",
+                    "url": "https://example.com/3",
+                },
+            ],
+            stock_name="五洲新春",
+            sample_label="机器人概念",
+            concept_labels={"886069.TI": {"name": "人形机器人", "code": "886069.TI"}},
+            waves=[
+                {
+                    "start_date": "2025-11-28",
+                    "peak_date": "2026-01-22",
+                }
+            ],
+            top_k=2,
+        )
+
+        self.assertEqual(len(selected), 2)
+        self.assertEqual(selected[0]["title"], "五洲新春切入机器人丝杠")
+        self.assertEqual(selected[0]["source_id"], "zsxq_saidao_touyan")
+        self.assertEqual(selected[1]["title"], "机器人板块回暖")
+
+    def test_select_news_evidence_accepts_tz_aware_published_at(self):
+        module = load_module()
+
+        selected = module._select_news_evidence(
+            news_evidence=[
+                {
+                    "published_at": "2025-11-27 08:00:00+08:00",
+                    "source_id": "zsxq_saidao_touyan",
+                    "title": "五洲新春切入机器人丝杠",
+                    "raw_text": "五洲新春与机器人丝杠主线直接相关。",
+                    "url": "https://example.com/1",
+                }
+            ],
+            stock_name="五洲新春",
+            sample_label="机器人概念",
+            concept_labels={"886069.TI": {"name": "人形机器人", "code": "886069.TI"}},
+            waves=[
+                {
+                    "start_date": "2025-11-28",
+                    "peak_date": "2026-01-22",
+                }
+            ],
+            top_k=1,
+        )
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["title"], "五洲新春切入机器人丝杠")
+
+    def test_run_stock_wave_attribution_only_keeps_selected_news_rows(self):
+        module = load_module()
+        stock_df = pd.DataFrame(
+            [
+                {"trade_date": "2025-11-28", "open_qfq": 44.0, "high_qfq": 45.0, "low_qfq": 43.8, "close_qfq": 44.91},
+                {"trade_date": "2025-12-01", "open_qfq": 45.2, "high_qfq": 48.0, "low_qfq": 45.0, "close_qfq": 47.5},
+                {"trade_date": "2025-12-02", "open_qfq": 47.6, "high_qfq": 50.8, "low_qfq": 47.2, "close_qfq": 50.2},
+                {"trade_date": "2025-12-03", "open_qfq": 50.1, "high_qfq": 55.0, "low_qfq": 49.8, "close_qfq": 54.8},
+            ]
+        )
+        stock_bundle = {
+            "raw_stock_daily_qfq": stock_df,
+            "raw_daily_basic": pd.DataFrame([{"trade_date": "2025-11-28", "turnover_rate": 5.1}]),
+            "raw_moneyflow": pd.DataFrame([{"trade_date": "2025-12-03", "net_mf_amount": 4200.0}]),
+            "raw_limit_list_d": pd.DataFrame([{"trade_date": "2025-12-03", "limit_status": "U", "open_times": 0}]),
+        }
+        news_rows = [
+            {
+                "published_at": "2025-11-27 08:00",
+                "source_id": "zsxq_saidao_touyan",
+                "title": "五洲新春切入机器人丝杠",
+                "raw_text": "五洲新春与机器人丝杠主线直接相关。\n第二段补充。",
+                "url": "https://example.com/1",
+            },
+            {
+                "published_at": "2025-11-28 10:00",
+                "source_id": "zsxq_damao",
+                "title": "五洲新春切入机器人丝杠",
+                "raw_text": "五洲新春与机器人丝杠主线直接相关。\n第二段补充。",
+                "url": "https://example.com/dup",
+            },
+            {
+                "published_at": "2025-12-28 09:00",
+                "source_id": "wscn_live",
+                "title": "机器人板块回暖",
+                "raw_text": "机器人板块回暖，但未直接提到五洲新春。",
+                "url": "https://example.com/2",
+            },
+        ]
+        concept_frames = {
+            "886069.TI": pd.DataFrame(
+                [
+                    {"trade_date": "2025-11-28", "close": 100.0},
+                    {"trade_date": "2025-12-01", "close": 104.0},
+                    {"trade_date": "2025-12-02", "close": 108.0},
+                    {"trade_date": "2025-12-03", "close": 112.0},
+                ]
+            )
+        }
+        concept_labels = {"886069.TI": {"code": "886069.TI", "name": "人形机器人"}}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir)
+
+            def fake_plotter(df, waves, output_path, title, style="enhanced"):
+                output = Path(output_path)
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"fake-png")
+                return {"output_path": str(output), "candles_plotted": len(df), "waves_annotated": len(waves), "style": style}
+
+            result = module.run_stock_wave_attribution(
+                case_context={
+                    "stock_name": "五洲新春",
+                    "ts_code": "603667.SH",
+                    "start_date": "2025-11-05",
+                    "end_date": "2026-01-22",
+                },
+                stock_bundle=stock_bundle,
+                news_evidence=news_rows,
+                concept_frames=concept_frames,
+                concept_labels=concept_labels,
+                output_root=output_root,
+                segmenter=lambda df: [
+                    {
+                        "start_date": "2025-11-28",
+                        "peak_date": "2025-12-03",
+                        "start_price": 44.91,
+                        "peak_price": 54.8,
+                        "wave_gain_pct": 22.02,
+                        "bars": 4,
+                    }
+                ],
+                plotter=fake_plotter,
+            )
+
+            markdown = Path(result["report_path"]).read_text(encoding="utf-8")
+            self.assertEqual(markdown.count("#### 证据 "), 2)
+            self.assertEqual(markdown.count("五洲新春切入机器人丝杠"), 3)
+            self.assertIn("机器人板块回暖", markdown)
+            self.assertNotIn("https://example.com/dup", markdown)
+
     def test_build_wave_attribution_search_prompt_uses_standardized_fields_and_order(self):
         module = load_module()
 
@@ -80,6 +266,7 @@ class StockWaveOrchestratorTest(unittest.TestCase):
 
         self.assertEqual(module.DEFAULT_CONFIG_PATH, SKILL_ROOT / "stock-wave-attribution.yaml")
         self.assertTrue(module.DEFAULT_CONFIG_PATH.exists())
+        self.assertFalse(module.DEFAULT_CONFIG["chatgpt"]["enabled"])
 
     def test_render_detailed_markdown_contract_contains_required_tables(self):
         module = load_module()
@@ -129,7 +316,7 @@ class StockWaveOrchestratorTest(unittest.TestCase):
         self.assertIn("| 概念 | 代码 | 区间涨幅 | 收盘价相关系数 | 日收益率相关系数 | 解释 |", markdown)
         self.assertIn("| 维度 | 结论 | 置信度 | 说明 |", markdown)
 
-    def test_orchestrator_writes_report_and_records_skill_local_call_chain(self):
+    def test_orchestrator_defaults_to_local_flow_without_chatgpt(self):
         module = load_module()
         stock_df = pd.DataFrame(
             [
@@ -232,13 +419,259 @@ class StockWaveOrchestratorTest(unittest.TestCase):
             self.assertIn("### 证据原文", markdown)
             self.assertIn("#### 证据 1", markdown)
             self.assertIn("```text", markdown)
-            self.assertEqual(chatgpt_calls, ["plain", "search"])
+            self.assertEqual(chatgpt_calls, [])
+            self.assertIn("待结合本地证据裁决", markdown)
             self.assertIn("runtime/wave_segmentation.py", result["call_chain"])
             self.assertIn("runtime/wave_plotting.py", result["call_chain"])
             self.assertIn("runtime/attribution_data.py", result["call_chain"])
-            self.assertIn("skills/chatgpt-plus-browser/scripts/chatgpt_cdp.mjs", result["call_chain"])
+            self.assertNotIn("skills/chatgpt-plus-browser/scripts/chatgpt_cdp.mjs", result["call_chain"])
             self.assertTrue(Path(result["plot_path"]).exists())
             self.assertTrue(Path(result["report_contract_path"]).exists())
+
+    def test_orchestrator_can_still_enable_chatgpt_flow_explicitly(self):
+        module = load_module()
+        stock_df = pd.DataFrame(
+            [
+                {"trade_date": "2025-11-28", "open_qfq": 44.0, "high_qfq": 45.0, "low_qfq": 43.8, "close_qfq": 44.91},
+                {"trade_date": "2025-12-01", "open_qfq": 45.2, "high_qfq": 48.0, "low_qfq": 45.0, "close_qfq": 47.5},
+                {"trade_date": "2025-12-02", "open_qfq": 47.6, "high_qfq": 50.8, "low_qfq": 47.2, "close_qfq": 50.2},
+                {"trade_date": "2025-12-03", "open_qfq": 50.1, "high_qfq": 55.0, "low_qfq": 49.8, "close_qfq": 54.8},
+            ]
+        )
+        stock_bundle = {
+            "raw_stock_daily_qfq": stock_df,
+            "raw_daily_basic": pd.DataFrame([{"trade_date": "2025-11-28", "turnover_rate": 5.1}]),
+            "raw_moneyflow": pd.DataFrame([{"trade_date": "2025-12-03", "net_mf_amount": 4200.0}]),
+            "raw_limit_list_d": pd.DataFrame([{"trade_date": "2025-12-03", "limit_status": "U", "open_times": 0}]),
+        }
+        news_rows = [
+            {
+                "published_at": "2025-11-05 19:37",
+                "source_id": "zsxq_zhuwang",
+                "title": "小鹏科技日",
+                "raw_text": "机器人主题启动",
+                "url": "https://example.com/1",
+            }
+        ]
+        concept_frames = {
+            "886069.TI": pd.DataFrame(
+                [
+                    {"trade_date": "2025-11-28", "close": 100.0},
+                    {"trade_date": "2025-12-01", "close": 104.0},
+                    {"trade_date": "2025-12-02", "close": 108.0},
+                    {"trade_date": "2025-12-03", "close": 112.0},
+                ]
+            )
+        }
+        concept_labels = {"886069.TI": {"code": "886069.TI", "name": "人形机器人"}}
+
+        chatgpt_calls = []
+
+        def fake_chatgpt(prompt, mode, **kwargs):
+            chatgpt_calls.append(mode)
+            if mode == "plain":
+                return "结论：up_valid"
+            return "主因：机器人跨年主线\n备选：小鹏科技日\n搜索依据：公开市场材料"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir)
+
+            def fake_plotter(df, waves, output_path, title, style="enhanced"):
+                output = Path(output_path)
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"fake-png")
+                return {"output_path": str(output), "candles_plotted": len(df), "waves_annotated": len(waves), "style": style}
+
+            result = module.run_stock_wave_attribution(
+                case_context={
+                    "stock_name": "五洲新春",
+                    "ts_code": "603667.SH",
+                    "start_date": "2025-11-05",
+                    "end_date": "2026-01-22",
+                },
+                stock_bundle=stock_bundle,
+                news_evidence=news_rows,
+                concept_frames=concept_frames,
+                concept_labels=concept_labels,
+                output_root=output_root,
+                segmenter=lambda df: [
+                    {
+                        "start_date": "2025-11-28",
+                        "peak_date": "2025-12-03",
+                        "start_price": 44.91,
+                        "peak_price": 54.8,
+                        "wave_gain_pct": 22.02,
+                        "bars": 4,
+                    }
+                ],
+                plotter=fake_plotter,
+                chatgpt_runner=fake_chatgpt,
+                use_chatgpt=True,
+            )
+
+            self.assertEqual(chatgpt_calls, ["plain", "search"])
+            self.assertIn("skills/chatgpt-plus-browser/scripts/chatgpt_cdp.mjs", result["call_chain"])
+
+    def test_run_local_attribution_task_uses_db_fetchers_and_local_runner(self):
+        module = load_module()
+        calls = {
+            "dsn": [],
+            "keywords": None,
+            "analysis_dir": None,
+            "plot_dir": None,
+        }
+
+        class _DummyConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        def fake_connect(dsn):
+            calls["dsn"].append(dsn)
+            return _DummyConnection()
+
+        def fake_stock_bundle_fetcher(conn, ts_code, start_date, end_date):
+            self.assertIsInstance(conn, _DummyConnection)
+            self.assertEqual(ts_code, "603667.SH")
+            return {
+                "raw_stock_daily_qfq": pd.DataFrame(
+                    [
+                        {"trade_date": "2025-11-05", "open_qfq": 10.0, "high_qfq": 10.5, "low_qfq": 9.8, "close_qfq": 10.0},
+                        {"trade_date": "2025-11-06", "open_qfq": 10.1, "high_qfq": 10.8, "low_qfq": 10.0, "close_qfq": 10.6},
+                    ]
+                ),
+                "raw_daily_basic": pd.DataFrame([{"trade_date": "2025-11-05", "turnover_rate": 5.0}]),
+                "raw_moneyflow": pd.DataFrame([{"trade_date": "2025-11-06", "net_mf_amount": 1200.0}]),
+                "raw_limit_list_d": pd.DataFrame([{"trade_date": "2025-11-06", "limit_status": "U"}]),
+            }
+
+        def fake_concept_fetcher(conn, ts_code, start_date, end_date):
+            self.assertIsInstance(conn, _DummyConnection)
+            return (
+                {
+                    "886069.TI": pd.DataFrame(
+                        [
+                            {"trade_date": "2025-11-05", "close": 100.0},
+                            {"trade_date": "2025-11-06", "close": 103.0},
+                        ]
+                    )
+                },
+                {"886069.TI": {"code": "886069.TI", "name": "人形机器人"}},
+            )
+
+        def fake_news_fetcher(conn, start_date, end_date, keywords):
+            self.assertIsInstance(conn, _DummyConnection)
+            calls["keywords"] = list(keywords)
+            return [
+                {
+                    "published_at": "2025-11-05 19:37",
+                    "source_id": "zsxq_zhuwang",
+                    "title": "小鹏科技日",
+                    "raw_text": "机器人主题启动",
+                    "url": "https://example.com/1",
+                }
+            ]
+
+        def fake_runner(case_context, stock_bundle, news_evidence, concept_frames, concept_labels, analysis_dir=None, plot_dir=None, **kwargs):
+            calls["analysis_dir"] = analysis_dir
+            calls["plot_dir"] = plot_dir
+            self.assertEqual(case_context["stock_name"], "五洲新春")
+            self.assertEqual(sorted(concept_frames.keys()), ["886069.TI"])
+            self.assertEqual(concept_labels["886069.TI"]["name"], "人形机器人")
+            return {
+                "report_path": "/tmp/fake-report.md",
+                "plot_path": "/tmp/fake-plot.png",
+                "report_contract_path": "/tmp/contract.md",
+                "call_chain": ["runtime/wave_segmentation.py"],
+                "wave_count": 1,
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "stock-wave-attribution.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "postgres:",
+                        "  event_news_dsn: postgresql://tester@localhost:5432/event_news",
+                        "  event_quant_dsn: postgresql://tester@localhost:5432/event_quant",
+                        "tushare:",
+                        "  token: dummy-token",
+                        "  http_url: http://example.com",
+                        "paths:",
+                        f"  analysis_dir: {tmpdir}/docs/analysis",
+                        f"  plot_dir: {tmpdir}/data/plots",
+                        f"  cache_dir: {tmpdir}/data/stock_cache",
+                        "chatgpt:",
+                        "  enabled: false",
+                        "  node_bin: node",
+                        "  script_path: ../chatgpt-plus-browser/scripts/chatgpt_cdp.mjs",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = module.run_local_attribution_task(
+                stock_name="五洲新春",
+                ts_code="603667.SH",
+                start_date="2025-11-05",
+                end_date="2026-01-22",
+                sample_label="机器人概念",
+                config_path=config_path,
+                db_connect=fake_connect,
+                stock_bundle_fetcher=fake_stock_bundle_fetcher,
+                concept_fetcher=fake_concept_fetcher,
+                news_fetcher=fake_news_fetcher,
+                attribution_runner=fake_runner,
+            )
+
+        self.assertEqual(
+            calls["dsn"],
+            [
+                "postgresql://tester@localhost:5432/event_quant",
+                "postgresql://tester@localhost:5432/event_news",
+            ],
+        )
+        self.assertIn("五洲新春", calls["keywords"])
+        self.assertIn("机器人", calls["keywords"])
+        self.assertIn("人形机器人", calls["keywords"])
+        self.assertTrue(str(calls["analysis_dir"]).endswith("/docs/analysis"))
+        self.assertTrue(str(calls["plot_dir"]).endswith("/data/plots"))
+        self.assertEqual(result["report_path"], "/tmp/fake-report.md")
+
+    def test_main_run_prints_json_result(self):
+        module = load_module()
+        buffer = io.StringIO()
+
+        def fake_run_local_attribution_task(**kwargs):
+            self.assertEqual(kwargs["stock_name"], "五洲新春")
+            self.assertEqual(kwargs["ts_code"], "603667.SH")
+            return {"report_path": "/tmp/fake-report.md", "plot_path": "/tmp/fake-plot.png"}
+
+        module.run_local_attribution_task = fake_run_local_attribution_task
+
+        with redirect_stdout(buffer):
+            status = module.main(
+                [
+                    "run",
+                    "--stock-name",
+                    "五洲新春",
+                    "--ts-code",
+                    "603667.SH",
+                    "--start-date",
+                    "2025-11-05",
+                    "--end-date",
+                    "2026-01-22",
+                    "--sample-label",
+                    "机器人概念",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        payload = json.loads(buffer.getvalue())
+        self.assertEqual(payload["report_path"], "/tmp/fake-report.md")
+        self.assertEqual(payload["plot_path"], "/tmp/fake-plot.png")
 
 
 if __name__ == "__main__":

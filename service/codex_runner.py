@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from subprocess import CalledProcessError, TimeoutExpired, run as subprocess_run
 
@@ -12,17 +13,63 @@ WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CODEX_TIMEOUT_SECONDS = 900
 
 
-def build_codex_prompt(task: AttributionTask) -> str:
+def build_codex_base_instructions() -> str:
     return (
-        "请使用 stock-wave-attribution skill 执行一条正式 A 股波段归因任务。\n"
-        f"标的：{task.stock_name}（{task.ts_code}）\n"
-        f"分析窗口：{task.start_date} 到 {task.end_date}\n"
-        f"样本标签：{task.sample_label}\n"
-        "要求：\n"
-        "1. 使用本地 PostgreSQL 的 event_quant / event_news。\n"
-        "2. 正式报告必须落到 docs/analysis。\n"
-        "3. 如果 ChatGPT 登录态异常，报告里必须写明 task id、prompt 和 .state 路径。\n"
-        "4. 输出以正式报告为准，不要只给过程说明。\n"
+        "你正在执行 case_data 的单票波段归因服务任务。"
+        "目标不是探索仓库，而是尽快完成一条正式归因链，"
+        "并把结果文件都写回正式报告与任务状态，"
+        "包括报告、配图、ChatGPT 任务信息或失败占位。"
+    )
+
+
+def build_codex_developer_instructions() -> str:
+    return (
+        "不要先全仓库探索，不要先阅读无关 skill，不要先运行 `rg --files .` 或同类全仓库扫描。"
+        "优先直接执行给定命令。"
+        "只有当命令本身失败时，才允许回退到最小必要阅读。"
+        "除非指定入口文件不存在或直接报错，否则只允许先读取以下入口文件："
+        "skills/stock-wave-attribution/scripts/orchestrator.py、"
+        "scripts/attribution_data.py、"
+        "scripts/wave_segmentation.py、"
+        "scripts/wave_plotting.py。"
+        "优先执行明确步骤，而不是先做开放式仓库调研。"
+    )
+
+
+def build_skill_run_command(task: AttributionTask) -> str:
+    return shlex.join(
+        [
+            "python",
+            "skills/stock-wave-attribution/scripts/orchestrator.py",
+            "run",
+            "--stock-name",
+            task.stock_name,
+            "--ts-code",
+            task.ts_code,
+            "--start-date",
+            task.start_date,
+            "--end-date",
+            task.end_date,
+            "--sample-label",
+            task.sample_label,
+        ]
+    )
+
+
+def build_codex_prompt(task: AttributionTask) -> str:
+    command = build_skill_run_command(task)
+    return (
+        "请不要先阅读 skill 文档或仓库代码，直接在项目根目录执行下面这条命令，并等待命令完成：\n"
+        f"{command}\n\n"
+        "任务说明：\n"
+        f"- 标的：{task.stock_name}（{task.ts_code}）\n"
+        f"- 分析窗口：{task.start_date} 到 {task.end_date}\n"
+        f"- 样本标签：{task.sample_label}\n"
+        "- 该命令会按当前目录的 stock-wave-attribution skill 完整本地归因流程执行。\n"
+        "- 使用本地 PostgreSQL 的 event_quant / event_news 与 tushare。\n"
+        "- 当前默认不启用 ChatGPT 补强链路，按本地归因链完成即可。\n"
+        "- 正式报告必须落到 docs/analysis，并生成配图到 data/plots。\n"
+        "- 如果命令首次失败，再只阅读最小必要文件定位原因，不要先做开放式探索。\n"
     )
 
 

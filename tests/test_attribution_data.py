@@ -4,10 +4,12 @@ import pandas as pd
 
 from scripts.attribution_data import (
     DEFAULT_EVENT_NEWS_DSN,
+    DEFAULT_NEWS_SOURCES,
     DEFAULT_EVENT_QUANT_DSN,
     MARKET_BENCHMARKS,
     build_stock_window_bundle_queries,
     build_validation_table,
+    fetch_stock_concept_frames,
     fetch_news_evidence,
     fetch_stock_window_bundle,
     postgres_bootstrap_commands,
@@ -60,6 +62,17 @@ class AttributionDataTest(unittest.TestCase):
                 ("399001.SZ", "深证成指"),
                 ("399006.SZ", "创业板指"),
             ],
+        )
+
+    def test_default_news_sources_include_core_research_and_live_feeds(self):
+        self.assertEqual(
+            DEFAULT_NEWS_SOURCES,
+            (
+                "zsxq_zhuwang",
+                "zsxq_damao",
+                "zsxq_saidao_touyan",
+                "wscn_live",
+            ),
         )
 
     def test_build_stock_window_bundle_queries_cover_core_tables(self):
@@ -144,6 +157,34 @@ class AttributionDataTest(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["title"], "小鹏机器人科技日")
         self.assertEqual(result[0]["raw_text"], "完整摘要")
+
+    def test_fetch_stock_concept_frames_groups_frames_and_labels(self):
+        conn = self._FakeConnection(
+            [
+                (
+                    ["concept_code", "concept_name", "trade_date", "close"],
+                    [
+                        ("886069.TI", "人形机器人", "2025-11-05", 100.0),
+                        ("886069.TI", "人形机器人", "2025-11-06", 104.0),
+                        ("885728.TI", "减速器", "2025-11-05", 88.0),
+                        ("885728.TI", "减速器", "2025-11-06", 90.0),
+                    ],
+                )
+            ]
+        )
+
+        frames, labels = fetch_stock_concept_frames(
+            conn,
+            ts_code="603667.SH",
+            start_date="2025-11-05",
+            end_date="2025-11-06",
+        )
+
+        self.assertEqual(sorted(frames.keys()), ["885728.TI", "886069.TI"])
+        self.assertEqual(list(frames["886069.TI"].columns), ["trade_date", "close"])
+        self.assertEqual(frames["886069.TI"].iloc[-1]["close"], 104.0)
+        self.assertEqual(labels["886069.TI"]["name"], "人形机器人")
+        self.assertEqual(labels["885728.TI"]["code"], "885728.TI")
 
     def test_build_validation_table_returns_top5_sorted_by_close_corr(self):
         stock_df = pd.DataFrame(

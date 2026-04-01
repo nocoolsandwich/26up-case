@@ -7,6 +7,12 @@ import pandas as pd
 
 DEFAULT_EVENT_NEWS_DSN = "postgresql://postgres:postgres@localhost:5432/event_news"
 DEFAULT_EVENT_QUANT_DSN = "postgresql://postgres:postgres@localhost:5432/event_quant"
+DEFAULT_NEWS_SOURCES = (
+    "zsxq_zhuwang",
+    "zsxq_damao",
+    "zsxq_saidao_touyan",
+    "wscn_live",
+)
 MARKET_BENCHMARKS = [
     ("000001.SH", "上证指数"),
     ("399001.SZ", "深证成指"),
@@ -68,6 +74,51 @@ def fetch_stock_window_bundle(conn, ts_code: str, start_date: str, end_date: str
     return frames
 
 
+def fetch_stock_concept_frames(
+    conn,
+    ts_code: str,
+    start_date: str,
+    end_date: str,
+) -> tuple[dict[str, pd.DataFrame], dict[str, dict[str, str]]]:
+    sql = """
+select m.concept_code, m.concept_name, d.trade_date, d.close
+from ana_stock_concept_map m
+join ana_concept_day d
+  on m.concept_code = d.concept_code
+where m.ts_code = %(ts_code)s
+  and d.trade_date between %(start_date)s and %(end_date)s
+order by m.concept_code, d.trade_date
+""".strip()
+    with conn.cursor() as cur:
+        cur.execute(
+            sql,
+            {
+                "ts_code": ts_code,
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        return {}, {}
+
+    frame = pd.DataFrame(rows, columns=["concept_code", "concept_name", "trade_date", "close"])
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+
+    concept_frames: dict[str, pd.DataFrame] = {}
+    concept_labels: dict[str, dict[str, str]] = {}
+    for concept_code, group in frame.groupby("concept_code", sort=True):
+        code = str(concept_code)
+        concept_name = str(group["concept_name"].iloc[0])
+        concept_frames[code] = group[["trade_date", "close"]].reset_index(drop=True)
+        concept_labels[code] = {
+            "code": code,
+            "name": concept_name,
+        }
+    return concept_frames, concept_labels
+
+
 def standardize_news_evidence_rows(
     rows: Sequence[tuple[object, object, object, object, object]],
 ) -> list[dict[str, object]]:
@@ -92,7 +143,7 @@ def fetch_news_evidence(
     keywords: Sequence[str],
     sources: Sequence[str] | None = None,
 ) -> list[dict[str, object]]:
-    sources = tuple(sources or ("zsxq_zhuwang", "zsxq_damao", "wscn_live"))
+    sources = tuple(sources or DEFAULT_NEWS_SOURCES)
     sql = """
 select published_at, source_id, title, coalesce(summary, '') as summary, url
 from event_metadata

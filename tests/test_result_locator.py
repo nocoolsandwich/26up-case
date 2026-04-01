@@ -95,3 +95,67 @@ def test_locate_task_result_can_extract_chatgpt_task_id_from_report(tmp_path: Pa
     result = locate_task_result(task, workspace_root=tmp_path)
 
     assert result["chatgpt_task_id"] == "d7b0a15f-688a-41af-b738-ec8d9ab5290a"
+
+
+def test_locate_task_result_prefers_plot_path_embedded_in_report(tmp_path: Path) -> None:
+    report_dir = tmp_path / "docs" / "analysis"
+    plot_dir = tmp_path / "data" / "plots"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / "2026-03-31-603667SH-五洲新春-wave-attribution.md"
+    report_plot_path = plot_dir / "603667_SH_orchestrator.png"
+    fallback_plot_path = plot_dir / "603667_SH_wave_candles.png"
+    report_path.write_text(
+        "\n".join(
+            [
+                "# demo",
+                "",
+                "![](../../data/plots/603667_SH_orchestrator.png)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    report_plot_path.write_text("png", encoding="utf-8")
+    fallback_plot_path.write_text("old-png", encoding="utf-8")
+
+    task = AttributionTask(
+        task_id="attr-009",
+        stock_name="五洲新春",
+        ts_code="603667.SH",
+        start_date="2025-11-05",
+        end_date="2026-01-22",
+        sample_label="机器人概念",
+    )
+
+    result = locate_task_result(task, workspace_root=tmp_path)
+
+    assert result["report_path"].endswith("2026-03-31-603667SH-五洲新春-wave-attribution.md")
+    assert result["plot_path"].endswith("603667_SH_orchestrator.png")
+
+
+def test_locate_task_result_report_plot_overrides_stale_task_plot_path(tmp_path: Path) -> None:
+    report_dir = tmp_path / "docs" / "analysis"
+    plot_dir = tmp_path / "data" / "plots"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / "2026-03-31-603667SH-五洲新春-wave-attribution.md"
+    report_plot_path = plot_dir / "603667_SH_orchestrator.png"
+    stale_plot_path = plot_dir / "603667_SH_wave_candles.png"
+    report_path.write_text("![](../../data/plots/603667_SH_orchestrator.png)\n", encoding="utf-8")
+    report_plot_path.write_text("png", encoding="utf-8")
+    stale_plot_path.write_text("old-png", encoding="utf-8")
+
+    task = AttributionTask(
+        task_id="attr-010",
+        stock_name="五洲新春",
+        ts_code="603667.SH",
+        start_date="2025-11-05",
+        end_date="2026-01-22",
+        sample_label="机器人概念",
+        report_path=str(report_path),
+        plot_path=str(stale_plot_path),
+    )
+
+    result = locate_task_result(task, workspace_root=tmp_path)
+
+    assert result["plot_path"].endswith("603667_SH_orchestrator.png")

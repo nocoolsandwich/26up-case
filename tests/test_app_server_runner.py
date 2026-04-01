@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import json
 
-from service.app_server_runner import build_app_server_command, run_app_server_task
+from service.app_server_runner import build_app_server_command, build_app_server_env, run_app_server_task
 from service.models import AttributionTask, TaskStatus
 from service.task_store import TaskStore
 
@@ -71,6 +71,31 @@ def _make_time(values: list[float]):
 
 def test_build_app_server_command_uses_codex_app_server() -> None:
     assert build_app_server_command() == ["codex", "app-server"]
+
+
+def test_build_app_server_env_defaults_to_local_proxy() -> None:
+    env = build_app_server_env({})
+
+    assert env["HTTP_PROXY"] == "http://127.0.0.1:7897"
+    assert env["HTTPS_PROXY"] == "http://127.0.0.1:7897"
+    assert env["ALL_PROXY"] == "http://127.0.0.1:7897"
+    assert env["NO_PROXY"] == "localhost,127.0.0.1"
+
+
+def test_build_app_server_env_keeps_existing_proxy_values() -> None:
+    env = build_app_server_env(
+        {
+            "HTTP_PROXY": "http://127.0.0.1:9999",
+            "HTTPS_PROXY": "http://127.0.0.1:9998",
+            "ALL_PROXY": "socks5://127.0.0.1:1080",
+            "NO_PROXY": "example.com",
+        }
+    )
+
+    assert env["HTTP_PROXY"] == "http://127.0.0.1:9999"
+    assert env["HTTPS_PROXY"] == "http://127.0.0.1:9998"
+    assert env["ALL_PROXY"] == "socks5://127.0.0.1:1080"
+    assert env["NO_PROXY"] == "example.com"
 
 
 def test_run_app_server_task_completes_and_records_requests_progress_and_log(tmp_path) -> None:
@@ -169,10 +194,16 @@ def test_run_app_server_task_completes_and_records_requests_progress_and_log(tmp
         stderr="app server stderr noise",
     )
 
+    captured_kwargs: dict[str, object] = {}
+
+    def process_factory(*_args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return process
+
     updated = run_app_server_task(
         task,
         store,
-        process_factory=lambda *_args, **_kwargs: process,
+        process_factory=process_factory,
         workspace_root=tmp_path,
     )
 
@@ -195,11 +226,24 @@ def test_run_app_server_task_completes_and_records_requests_progress_and_log(tmp
     assert requests[1]["params"]["cwd"] == str(tmp_path)
     assert requests[1]["params"]["approvalPolicy"] == "never"
     assert requests[1]["params"]["sandbox"] == "danger-full-access"
+    assert "优先直接执行给定命令" in requests[1]["params"]["developerInstructions"]
+    assert "不要先全仓库探索" in requests[1]["params"]["developerInstructions"]
+    assert "skills/stock-wave-attribution/scripts/orchestrator.py" in requests[1]["params"]["developerInstructions"]
+    assert "结果文件都写回正式报告与任务状态" in requests[1]["params"]["baseInstructions"]
     assert requests[3]["params"]["conversationId"] == "conv-1"
     assert requests[3]["params"]["items"][0]["type"] == "text"
+    assert "直接在项目根目录执行下面这条命令" in requests[3]["params"]["items"][0]["data"]["text"]
+    assert "python skills/stock-wave-attribution/scripts/orchestrator.py run" in requests[3]["params"]["items"][0]["data"]["text"]
+    assert "当前默认不启用 ChatGPT 补强链路" in requests[3]["params"]["items"][0]["data"]["text"]
+    assert "正式报告必须落到 docs/analysis" in requests[3]["params"]["items"][0]["data"]["text"]
+    assert captured_kwargs["env"]["HTTP_PROXY"] == "http://127.0.0.1:7897"
+    assert captured_kwargs["env"]["HTTPS_PROXY"] == "http://127.0.0.1:7897"
+    assert captured_kwargs["env"]["ALL_PROXY"] == "http://127.0.0.1:7897"
+    assert captured_kwargs["env"]["NO_PROXY"] == "localhost,127.0.0.1"
 
     log_text = (tmp_path / "data" / "service_logs" / "attr-app-server-ok.log").read_text(encoding="utf-8")
     assert "[request] initialize" in log_text
+    assert "[proxy_env]" in log_text
     assert "[response] newConversation" in log_text
     assert "[notification] item/started" in log_text
     assert "wave plotting done" in log_text
@@ -410,3 +454,63 @@ def test_run_app_server_task_prefers_exec_command_begin_over_agent_delta_noise(t
     assert updated.progress_summary == "最近命令: /bin/zsh -lc 'rg --files .'"
     assert updated.last_event_type == "exec_command_begin"
     assert updated.last_command == "/bin/zsh -lc 'rg --files .'"
+
+
+def test_run_app_server_task_fails_fast_on_stream_error(tmp_path) -> None:
+    store = TaskStore(tmp_path / "service_tasks")
+    task = AttributionTask(
+        task_id="attr-app-server-stream-error",
+        stock_name="五洲新春",
+        ts_code="603667.SH",
+        start_date="2025-11-05",
+        end_date="2026-01-22",
+        sample_label="机器人概念",
+    )
+    store.save_task(task)
+    process = _FakeProcess(
+        [
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "0"}}),
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {
+                        "conversationId": "conv-stream-error",
+                        "rolloutPath": str(tmp_path / "rollout-stream-error.jsonl"),
+                        "model": "gpt-5.4",
+                        "reasoningEffort": None,
+                    },
+                }
+            ),
+            json.dumps({"jsonrpc": "2.0", "id": 3, "result": {}}),
+            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {}}),
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "codex/event/stream_error",
+                    "params": {
+                        "conversationId": "conv-stream-error",
+                        "id": "turn-stream-error",
+                        "msg": {
+                            "type": "stream_error",
+                            "message": "Reconnecting... 2/5",
+                            "additional_details": "stream disconnected before completion: failed to lookup address information",
+                        },
+                    },
+                }
+            ),
+        ]
+    )
+
+    updated = run_app_server_task(
+        task,
+        store,
+        process_factory=lambda *_args, **_kwargs: process,
+        workspace_root=tmp_path,
+        timeout_seconds=120,
+    )
+
+    assert updated.status == TaskStatus.FAILED
+    assert updated.stage == "codex_stream_error"
+    assert "failed to lookup address information" in updated.error
+    assert updated.last_event_type == "stream_error"
