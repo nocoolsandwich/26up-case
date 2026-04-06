@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import logging
 import time
 from collections import OrderedDict
@@ -11,7 +12,14 @@ from typing import Callable
 import pandas as pd
 from openpyxl import load_workbook
 import psycopg
+import requests
 import tushare as ts
+import numpy as np
+
+try:
+    import akshare as ak
+except ModuleNotFoundError:  # pragma: no cover - 生产环境默认已安装
+    ak = None
 
 try:
     from scripts.project_config import PROJECT_ROOT, load_project_config
@@ -373,6 +381,21 @@ def create_tushare_client(token: str, http_url: str = DEFAULT_TUSHARE_HTTP_URL):
     return pro
 
 
+@contextmanager
+def requests_sessions_without_proxy():
+    original_init = requests.sessions.Session.__init__
+
+    def patched_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        self.trust_env = False
+
+    requests.sessions.Session.__init__ = patched_init
+    try:
+        yield
+    finally:
+        requests.sessions.Session.__init__ = original_init
+
+
 def fetch_case_stock_bundle(
     pro,
     ts_code: str,
@@ -380,26 +403,70 @@ def fetch_case_stock_bundle(
     end_date: str,
     per_request_sleep_seconds: float = 0.0,
     sleeper: Callable[[float], None] | None = None,
+    ak_client=None,
 ) -> dict[str, pd.DataFrame]:
     sleeper = sleeper or time.sleep
+    ak_client = ak_client or ak
 
     def _call(func: Callable[[], object]):
         result = call_with_rate_limit_retry(func)
         if per_request_sleep_seconds > 0:
             sleeper(per_request_sleep_seconds)
         return result
-
-    daily_df = _call(lambda: pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date))
-    adj_factor_df = _call(lambda: pro.adj_factor(ts_code=ts_code, start_date=start_date, end_date=end_date))
-    daily_basic_df = _call(lambda: pro.daily_basic(ts_code=ts_code, start_date=start_date, end_date=end_date))
-    moneyflow_df = _call(lambda: pro.moneyflow(ts_code=ts_code, start_date=start_date, end_date=end_date))
-    limit_list_df = _call(lambda: pro.limit_list_d(ts_code=ts_code, start_date=start_date, end_date=end_date))
-    return {
-        "raw_stock_daily_qfq": build_qfq_daily_frame(daily_df, adj_factor_df),
-        "raw_daily_basic": normalize_daily_basic(daily_basic_df) if daily_basic_df is not None and not daily_basic_df.empty else pd.DataFrame(),
-        "raw_moneyflow": normalize_moneyflow(moneyflow_df) if moneyflow_df is not None and not moneyflow_df.empty else pd.DataFrame(),
-        "raw_limit_list_d": normalize_limit_list_d(limit_list_df) if limit_list_df is not None and not limit_list_df.empty else pd.DataFrame(),
-    }
+    logger.info(
+        "开始抓取股票包[Tushare]: ts_code=%s start_date=%s end_date=%s",
+        ts_code,
+        start_date,
+        end_date,
+    )
+    try:
+        daily_df = _call(lambda: pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date))
+        adj_factor_df = _call(lambda: pro.adj_factor(ts_code=ts_code, start_date=start_date, end_date=end_date))
+        daily_basic_df = _call(lambda: pro.daily_basic(ts_code=ts_code, start_date=start_date, end_date=end_date))
+        moneyflow_df = _call(lambda: pro.moneyflow(ts_code=ts_code, start_date=start_date, end_date=end_date))
+        limit_list_df = _call(lambda: pro.limit_list_d(ts_code=ts_code, start_date=start_date, end_date=end_date))
+        result = {
+            "raw_stock_daily_qfq": build_qfq_daily_frame(daily_df, adj_factor_df),
+            "raw_daily_basic": normalize_daily_basic(daily_basic_df) if daily_basic_df is not None and not daily_basic_df.empty else pd.DataFrame(),
+            "raw_moneyflow": normalize_moneyflow(moneyflow_df) if moneyflow_df is not None and not moneyflow_df.empty else pd.DataFrame(),
+            "raw_limit_list_d": normalize_limit_list_d(limit_list_df) if limit_list_df is not None and not limit_list_df.empty else pd.DataFrame(),
+        }
+        logger.info(
+            "股票包抓取完成[Tushare]: ts_code=%s rows=%s",
+            ts_code,
+            {name: len(frame) for name, frame in result.items()},
+        )
+        return result
+    except Exception as exc:
+        logger.warning(
+            "Tushare 抓取股票包失败，回退到 Akshare: ts_code=%s start_date=%s end_date=%s error=%s",
+            ts_code,
+            start_date,
+            end_date,
+            exc,
+        )
+        try:
+            result = fetch_case_stock_bundle_from_akshare(
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+                ak_client=ak_client,
+            )
+            logger.info(
+                "股票包抓取完成[Akshare]: ts_code=%s rows=%s",
+                ts_code,
+                {name: len(frame) for name, frame in result.items()},
+            )
+            return result
+        except Exception as ak_exc:
+            logger.error(
+                "Akshare fallback 也失败: ts_code=%s start_date=%s end_date=%s",
+                ts_code,
+                start_date,
+                end_date,
+                exc_info=True,
+            )
+            raise RuntimeError(f"Tushare 与 Akshare 均失败: {exc}; {ak_exc}") from ak_exc
 
 
 def load_sync_state(conn, job_name: str, target_table: str, target_key: str) -> dict[str, object] | None:
@@ -873,6 +940,212 @@ def normalize_stock_daily_qfq(df: pd.DataFrame) -> pd.DataFrame:
         ]
     ].copy()
     return result
+
+
+def resolve_akshare_stock_params(ts_code: str) -> tuple[str, str]:
+    symbol, market_suffix = ts_code.split(".")
+    market_map = {"SH": "sh", "SZ": "sz", "BJ": "bj"}
+    return symbol, market_map.get(market_suffix.upper(), market_suffix.lower())
+
+
+def _empty_stock_daily_qfq_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=["ts_code", "trade_date", "open_qfq", "high_qfq", "low_qfq", "close_qfq", "pct_chg", "vol", "amount"]
+    )
+
+
+def _empty_daily_basic_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=["ts_code", "trade_date", "turnover_rate", "turnover_rate_f", "volume_ratio", "pe", "pb", "total_mv", "circ_mv"]
+    )
+
+
+def _empty_moneyflow_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=["ts_code", "trade_date", "buy_lg_amount", "sell_lg_amount", "buy_elg_amount", "sell_elg_amount", "net_mf_amount"]
+    )
+
+
+def _empty_limit_list_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=["ts_code", "trade_date", "fd_amount", "first_time", "last_time", "open_times", "limit_status"]
+    )
+
+
+def build_akshare_qfq_daily_frame(hist_df: pd.DataFrame, ts_code: str) -> pd.DataFrame:
+    if hist_df is None or hist_df.empty:
+        return _empty_stock_daily_qfq_frame()
+    result = pd.DataFrame(
+        {
+            "ts_code": ts_code,
+            "trade_date": pd.to_datetime(hist_df["日期"]).dt.strftime("%Y-%m-%d"),
+            "open": pd.to_numeric(hist_df["开盘"], errors="coerce"),
+            "high": pd.to_numeric(hist_df["最高"], errors="coerce"),
+            "low": pd.to_numeric(hist_df["最低"], errors="coerce"),
+            "close": pd.to_numeric(hist_df["收盘"], errors="coerce"),
+            "pct_chg": pd.to_numeric(hist_df["涨跌幅"], errors="coerce"),
+            "vol": pd.to_numeric(hist_df["成交量"], errors="coerce"),
+            "amount": pd.to_numeric(hist_df["成交额"], errors="coerce"),
+        }
+    ).sort_values("trade_date")
+    return normalize_stock_daily_qfq(result)
+
+
+def build_akshare_daily_basic_frame(hist_df: pd.DataFrame, ts_code: str) -> pd.DataFrame:
+    if hist_df is None or hist_df.empty:
+        return _empty_daily_basic_frame()
+    result = pd.DataFrame(
+        {
+            "ts_code": ts_code,
+            "trade_date": pd.to_datetime(hist_df["日期"]).dt.strftime("%Y-%m-%d"),
+            "turnover_rate": pd.to_numeric(hist_df["换手率"], errors="coerce"),
+            "turnover_rate_f": np.nan,
+            "volume_ratio": np.nan,
+            "pe": np.nan,
+            "pb": np.nan,
+            "total_mv": np.nan,
+            "circ_mv": np.nan,
+        }
+    ).sort_values("trade_date")
+    return normalize_daily_basic(result)
+
+
+def build_akshare_moneyflow_frame(flow_df: pd.DataFrame, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+    if flow_df is None or flow_df.empty:
+        return _empty_moneyflow_frame()
+    start_iso = datetime.strptime(start_date, "%Y%m%d").strftime("%Y-%m-%d")
+    end_iso = datetime.strptime(end_date, "%Y%m%d").strftime("%Y-%m-%d")
+    result = pd.DataFrame(
+        {
+            "ts_code": ts_code,
+            "trade_date": pd.to_datetime(flow_df["日期"]).dt.strftime("%Y-%m-%d"),
+            "buy_lg_amount": np.nan,
+            "sell_lg_amount": np.nan,
+            "buy_elg_amount": np.nan,
+            "sell_elg_amount": np.nan,
+            "net_mf_amount": pd.to_numeric(flow_df["主力净流入-净额"], errors="coerce"),
+        }
+    )
+    result = result[(result["trade_date"] >= start_iso) & (result["trade_date"] <= end_iso)].sort_values("trade_date")
+    if result.empty:
+        return _empty_moneyflow_frame()
+    return normalize_moneyflow(result)
+
+
+def build_akshare_limit_list_frame(
+    hist_df: pd.DataFrame,
+    ts_code: str,
+    ak_client,
+) -> pd.DataFrame:
+    if hist_df is None or hist_df.empty:
+        return _empty_limit_list_frame()
+    symbol, _ = resolve_akshare_stock_params(ts_code)
+    trade_df = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(hist_df["日期"]).dt.strftime("%Y%m%d"),
+            "pct_chg": pd.to_numeric(hist_df["涨跌幅"], errors="coerce"),
+        }
+    ).dropna()
+    rows: list[dict[str, object]] = []
+    positive_days = sorted(trade_df.loc[trade_df["pct_chg"] >= 4.5, "trade_date"].unique())
+    negative_days = sorted(trade_df.loc[trade_df["pct_chg"] <= -4.5, "trade_date"].unique())
+    for trade_date in positive_days:
+        try:
+            day_df = ak_client.stock_zt_pool_em(date=trade_date)
+        except Exception as exc:
+            logger.warning("Akshare 涨停池拉取失败，跳过该日: ts_code=%s trade_date=%s error=%s", ts_code, trade_date, exc)
+            continue
+        if day_df is None or day_df.empty:
+            continue
+        hit = day_df.loc[day_df["代码"].astype(str) == symbol]
+        if hit.empty:
+            continue
+        row = hit.iloc[0]
+        rows.append(
+            {
+                "ts_code": ts_code,
+                "trade_date": datetime.strptime(trade_date, "%Y%m%d").strftime("%Y-%m-%d"),
+                "fd_amount": row.get("封板资金"),
+                "first_time": row.get("首次封板时间"),
+                "last_time": row.get("最后封板时间"),
+                "open_times": row.get("炸板次数", 0),
+                "limit_status": "U",
+            }
+        )
+    for trade_date in negative_days:
+        try:
+            day_df = ak_client.stock_zt_pool_dtgc_em(date=trade_date)
+        except Exception as exc:
+            logger.warning("Akshare 跌停池拉取失败，跳过该日: ts_code=%s trade_date=%s error=%s", ts_code, trade_date, exc)
+            continue
+        if day_df is None or day_df.empty:
+            continue
+        hit = day_df.loc[day_df["代码"].astype(str) == symbol]
+        if hit.empty:
+            continue
+        row = hit.iloc[0]
+        rows.append(
+            {
+                "ts_code": ts_code,
+                "trade_date": datetime.strptime(trade_date, "%Y%m%d").strftime("%Y-%m-%d"),
+                "fd_amount": row.get("封单资金"),
+                "first_time": None,
+                "last_time": row.get("最后封板时间"),
+                "open_times": row.get("开板次数", 0),
+                "limit_status": "D",
+            }
+        )
+    if not rows:
+        return _empty_limit_list_frame()
+    return normalize_limit_list_d(pd.DataFrame(rows).sort_values("trade_date"))
+
+
+def fetch_case_stock_bundle_from_akshare(
+    ts_code: str,
+    start_date: str,
+    end_date: str,
+    ak_client=None,
+) -> dict[str, pd.DataFrame]:
+    ak_client = ak_client or ak
+    if ak_client is None:
+        raise RuntimeError("Akshare 不可用")
+    symbol, market = resolve_akshare_stock_params(ts_code)
+    logger.info(
+        "开始抓取股票包[Akshare]: ts_code=%s symbol=%s market=%s start_date=%s end_date=%s",
+        ts_code,
+        symbol,
+        market,
+        start_date,
+        end_date,
+    )
+
+    def _load_bundle() -> tuple[pd.DataFrame, pd.DataFrame]:
+        hist = ak_client.stock_zh_a_hist(
+            symbol=symbol,
+            period="daily",
+            start_date=start_date,
+            end_date=end_date,
+            adjust="qfq",
+        )
+        fund = ak_client.stock_individual_fund_flow(stock=symbol, market=market)
+        return hist, fund
+
+    try:
+        with requests_sessions_without_proxy():
+            hist_df, moneyflow_df = _load_bundle()
+    except Exception:
+        logger.warning(
+            "Akshare 无代理请求失败，回退到默认网络环境: ts_code=%s symbol=%s",
+            ts_code,
+            symbol,
+        )
+        hist_df, moneyflow_df = _load_bundle()
+    return {
+        "raw_stock_daily_qfq": build_akshare_qfq_daily_frame(hist_df, ts_code),
+        "raw_daily_basic": build_akshare_daily_basic_frame(hist_df, ts_code),
+        "raw_moneyflow": build_akshare_moneyflow_frame(moneyflow_df, ts_code, start_date, end_date),
+        "raw_limit_list_d": build_akshare_limit_list_frame(hist_df, ts_code, ak_client),
+    }
 
 
 def build_qfq_daily_frame(daily_df: pd.DataFrame, adj_factor_df: pd.DataFrame) -> pd.DataFrame:

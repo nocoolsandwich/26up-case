@@ -1,8 +1,11 @@
 import unittest
+from contextlib import contextmanager
+from unittest import mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pandas as pd
+import requests
 from openpyxl import Workbook
 
 from scripts.event_quant_sync import (
@@ -26,7 +29,9 @@ from scripts.event_quant_sync import (
     call_with_rate_limit_retry,
     build_case_stock_sync_config,
     build_stock_bundle_sync_config,
+    build_akshare_limit_list_frame,
     build_qfq_daily_frame,
+    fetch_case_stock_bundle_from_akshare,
     run_stock_concept_bundle_sync,
     run_case_stock_bundle_sync,
     parse_state_cursor,
@@ -38,6 +43,7 @@ from scripts.event_quant_sync import (
     normalize_ana_concept_day,
     normalize_ana_stock_concept_map,
     normalize_stock_daily_qfq,
+    requests_sessions_without_proxy,
     normalize_ths_concept_daily,
     normalize_ths_member,
     sync_targets,
@@ -45,6 +51,17 @@ from scripts.event_quant_sync import (
 
 
 class EventQuantSyncTest(unittest.TestCase):
+    def test_requests_sessions_without_proxy_disables_trust_env_temporarily(self):
+        default_session = requests.Session()
+        self.assertTrue(default_session.trust_env)
+
+        with requests_sessions_without_proxy():
+            patched_session = requests.Session()
+            self.assertFalse(patched_session.trust_env)
+
+        restored_session = requests.Session()
+        self.assertTrue(restored_session.trust_env)
+
     def test_build_argument_parser_does_not_use_env_for_db_dsn_defaults(self):
         parser = build_argument_parser()
         args = parser.parse_args([
@@ -805,6 +822,245 @@ class EventQuantSyncTest(unittest.TestCase):
         self.assertEqual([item[0] for item in calls], ["daily", "adj_factor", "daily_basic", "moneyflow", "limit_list_d"])
         self.assertAlmostEqual(result["raw_stock_daily_qfq"].iloc[0]["close_qfq"], 21.0)
         self.assertEqual(sleep_calls, [1.5, 1.5, 1.5, 1.5, 1.5])
+
+    def test_fetch_case_stock_bundle_falls_back_to_akshare_when_tushare_fails(self):
+        class FakePro:
+            def daily(self, **kwargs):
+                raise Exception("无效的 token")
+
+        class FakeAk:
+            def stock_zh_a_hist(self, **kwargs):
+                return pd.DataFrame(
+                    [
+                        {
+                            "日期": pd.Timestamp("2025-01-02"),
+                            "股票代码": "601869",
+                            "开盘": 29.46,
+                            "收盘": 28.25,
+                            "最高": 29.77,
+                            "最低": 27.92,
+                            "成交量": 67119,
+                            "成交额": 194404400.0,
+                            "振幅": 6.25,
+                            "涨跌幅": -4.63,
+                            "涨跌额": -1.37,
+                            "换手率": 1.65,
+                        },
+                        {
+                            "日期": pd.Timestamp("2025-01-03"),
+                            "股票代码": "601869",
+                            "开盘": 28.39,
+                            "收盘": 30.21,
+                            "最高": 30.21,
+                            "最低": 27.23,
+                            "成交量": 61617,
+                            "成交额": 174160889.0,
+                            "振幅": 10.86,
+                            "涨跌幅": 10.0,
+                            "涨跌额": 2.79,
+                            "换手率": 1.52,
+                        },
+                    ]
+                )
+
+            def stock_individual_fund_flow(self, **kwargs):
+                return pd.DataFrame(
+                    [
+                        {
+                            "日期": pd.Timestamp("2025-01-03"),
+                            "收盘价": 30.21,
+                            "涨跌幅": 10.0,
+                            "主力净流入-净额": 8888.0,
+                            "主力净流入-净占比": 1.0,
+                            "超大单净流入-净额": 4444.0,
+                            "超大单净流入-净占比": 0.5,
+                            "大单净流入-净额": 4444.0,
+                            "大单净流入-净占比": 0.5,
+                            "中单净流入-净额": 0.0,
+                            "中单净流入-净占比": 0.0,
+                            "小单净流入-净额": 0.0,
+                            "小单净流入-净占比": 0.0,
+                        }
+                    ]
+                )
+
+            def stock_zt_pool_em(self, **kwargs):
+                return pd.DataFrame(
+                    [
+                        {
+                            "代码": "601869",
+                            "封板资金": 123456.0,
+                            "首次封板时间": "093000",
+                            "最后封板时间": "145700",
+                            "炸板次数": 1,
+                        }
+                    ]
+                )
+
+            def stock_zt_pool_dtgc_em(self, **kwargs):
+                return pd.DataFrame()
+
+        result = fetch_case_stock_bundle(
+            FakePro(),
+            "601869.SH",
+            "20250101",
+            "20250110",
+            ak_client=FakeAk(),
+        )
+
+        self.assertEqual(result["raw_stock_daily_qfq"].iloc[0]["ts_code"], "601869.SH")
+        self.assertEqual(list(result["raw_daily_basic"]["turnover_rate"]), [1.65, 1.52])
+        self.assertEqual(list(result["raw_moneyflow"]["net_mf_amount"]), [8888.0])
+        self.assertEqual(result["raw_limit_list_d"].iloc[0]["limit_status"], "U")
+        self.assertEqual(result["raw_limit_list_d"].iloc[0]["fd_amount"], 123456.0)
+
+    def test_fetch_case_stock_bundle_raises_when_tushare_and_akshare_both_fail(self):
+        class FakePro:
+            def daily(self, **kwargs):
+                raise Exception("无效的 token")
+
+        class FakeAk:
+            def stock_zh_a_hist(self, **kwargs):
+                raise RuntimeError("akshare boom")
+
+        with self.assertRaisesRegex(RuntimeError, "Tushare 与 Akshare 均失败"):
+            fetch_case_stock_bundle(
+                FakePro(),
+                "601869.SH",
+                "20250101",
+                "20250110",
+                ak_client=FakeAk(),
+            )
+
+    def test_fetch_case_stock_bundle_from_akshare_uses_module_default_client(self):
+        class FakeAk:
+            def stock_zh_a_hist(self, **kwargs):
+                return pd.DataFrame(
+                    [
+                        {
+                            "日期": pd.Timestamp("2025-01-02"),
+                            "股票代码": "601869",
+                            "开盘": 29.46,
+                            "收盘": 28.25,
+                            "最高": 29.77,
+                            "最低": 27.92,
+                            "成交量": 67119,
+                            "成交额": 194404400.0,
+                            "振幅": 6.25,
+                            "涨跌幅": -4.63,
+                            "涨跌额": -1.37,
+                            "换手率": 1.65,
+                        }
+                    ]
+                )
+
+            def stock_individual_fund_flow(self, **kwargs):
+                return pd.DataFrame(
+                    [
+                        {
+                            "日期": pd.Timestamp("2025-01-02"),
+                            "主力净流入-净额": 1234.0,
+                        }
+                    ]
+                )
+
+            def stock_zt_pool_em(self, **kwargs):
+                return pd.DataFrame()
+
+            def stock_zt_pool_dtgc_em(self, **kwargs):
+                return pd.DataFrame()
+
+        with mock.patch("scripts.event_quant_sync.ak", FakeAk()):
+            frames = fetch_case_stock_bundle_from_akshare("601869.SH", "20250101", "20250110")
+
+        self.assertEqual(list(frames["raw_daily_basic"]["turnover_rate"]), [1.65])
+        self.assertEqual(list(frames["raw_moneyflow"]["net_mf_amount"]), [1234.0])
+
+    def test_fetch_case_stock_bundle_from_akshare_retries_default_env_after_no_proxy_failure(self):
+        state = {"no_proxy": False, "hist_calls": 0}
+
+        @contextmanager
+        def fake_no_proxy():
+            previous = state["no_proxy"]
+            state["no_proxy"] = True
+            try:
+                yield
+            finally:
+                state["no_proxy"] = previous
+
+        class FakeAk:
+            def stock_zh_a_hist(self, **kwargs):
+                state["hist_calls"] += 1
+                if state["no_proxy"]:
+                    raise RuntimeError("no proxy path failed")
+                return pd.DataFrame(
+                    [
+                        {
+                            "日期": pd.Timestamp("2025-01-02"),
+                            "股票代码": "601869",
+                            "开盘": 29.46,
+                            "收盘": 28.25,
+                            "最高": 29.77,
+                            "最低": 27.92,
+                            "成交量": 67119,
+                            "成交额": 194404400.0,
+                            "振幅": 6.25,
+                            "涨跌幅": -4.63,
+                            "涨跌额": -1.37,
+                            "换手率": 1.65,
+                        }
+                    ]
+                )
+
+            def stock_individual_fund_flow(self, **kwargs):
+                return pd.DataFrame([{"日期": pd.Timestamp("2025-01-02"), "主力净流入-净额": 1234.0}])
+
+            def stock_zt_pool_em(self, **kwargs):
+                return pd.DataFrame()
+
+            def stock_zt_pool_dtgc_em(self, **kwargs):
+                return pd.DataFrame()
+
+        with mock.patch("scripts.event_quant_sync.requests_sessions_without_proxy", fake_no_proxy):
+            frames = fetch_case_stock_bundle_from_akshare(
+                "601869.SH",
+                "20250101",
+                "20250110",
+                ak_client=FakeAk(),
+            )
+
+        self.assertEqual(state["hist_calls"], 2)
+        self.assertEqual(len(frames["raw_stock_daily_qfq"]), 1)
+
+    def test_build_akshare_limit_list_frame_skips_unsupported_date_errors(self):
+        hist_df = pd.DataFrame(
+            [
+                {"日期": pd.Timestamp("2025-01-03"), "涨跌幅": 10.0},
+                {"日期": pd.Timestamp("2025-01-06"), "涨跌幅": -9.8},
+            ]
+        )
+
+        class FakeAk:
+            def stock_zt_pool_em(self, **kwargs):
+                return pd.DataFrame(
+                    [
+                        {
+                            "代码": "601869",
+                            "封板资金": 123456.0,
+                            "首次封板时间": "093000",
+                            "最后封板时间": "145700",
+                            "炸板次数": 1,
+                        }
+                    ]
+                )
+
+            def stock_zt_pool_dtgc_em(self, **kwargs):
+                raise ValueError("跌停股池只能获取最近 30 个交易日的数据")
+
+        result = build_akshare_limit_list_frame(hist_df, "601869.SH", FakeAk())
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.iloc[0]["limit_status"], "U")
 
     def test_call_with_rate_limit_retry_retries_after_limit_error(self):
         calls = []
