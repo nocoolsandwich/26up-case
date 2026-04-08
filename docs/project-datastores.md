@@ -62,6 +62,21 @@ brew services list | grep postgresql@16
 
 不要在未检查本机 PostgreSQL 前直接跳回本地文件或第三方接口。
 
+### 3.2 归因服务的数据库预检
+
+归因 service 现在会在真正执行 `/tasks/{task_id}/run` 前先做数据库预检：
+
+- `event_news` 是否可连接，且 `event_metadata` 是否存在
+- `event_quant` 是否可连接，且 `raw_stock_daily_qfq` 是否存在
+
+也可以单独调用：
+
+```bash
+curl http://127.0.0.1:8000/health/datastores
+```
+
+如果这里已经返回 `ok=false`，就先修 PostgreSQL 和数据库恢复，不要继续发正式归因任务。
+
 ### 3.1 兼容旧环境的 Docker 方案
 
 如果后续换到旧机器，仍然可以继续沿用 Docker 方案；但它不再是当前项目文档的默认口径。
@@ -128,7 +143,6 @@ PY
 - 来源优先级：
   - `zsxq_zhuwang`
   - `zsxq_damao`
-  - `wscn_live`
 
 在 `stock-wave-attribution` 流程里，它的职责是：
 
@@ -164,23 +178,23 @@ PY
 
 | 表名 | 行数 | 主要信息 |
 |---|---:|---|
-| `raw_stock_daily_qfq` | `48403` | 个股前复权日线 |
-| `raw_daily_basic` | `48288` | 换手率、市值、估值 |
-| `raw_moneyflow` | `47713` | 大单/超大单/净流入 |
-| `raw_limit_list_d` | `3042` | 涨停、开板、封单强度 |
+| `raw_stock_daily_qfq` | `1643357` | 个股前复权日线 |
+| `raw_daily_basic` | `1643357` | 换手率、市值、估值 |
+| `raw_moneyflow` | `1559925` | 大单/超大单/净流入 |
+| `raw_limit_list_d` | `32867` | 涨停、开板、封单强度 |
 | `raw_index_daily` | `18` | 上证/深成/创业板基准 |
-| `raw_ths_member` | `6923` | 概念 -> 成分股映射 |
-| `raw_ths_concept_daily` | `54679` | 概念指数原始日线 |
-| `ana_stock_concept_map` | `5754` | 股票 -> 概念映射 |
-| `ana_concept_day` | `54679` | 分析友好的概念指数日线 |
-| `sync_job_state` | `14` | 同步任务状态与断点续传 |
+| `raw_ths_member` | `80938` | 概念 -> 成分股映射 |
+| `raw_ths_concept_daily` | `194947` | 概念指数原始日线 |
+| `ana_stock_concept_map` | `74015` | 股票 -> 概念映射 |
+| `ana_concept_day` | `194947` | 分析友好的概念指数日线 |
+| `sync_job_state` | `22` | 同步任务状态与断点续传 |
 
 说明：
 
-- `Top200`：已具备第一优先级量价数据
-- `Top400`：已具备概念映射与概念指数，可直接做概念级分析
-- `Top400`：主营行业临时映射已可补出 `map / frequency`，但尚未升级成正式 `industry reps`
-- `Top201-400`：尚未补完整个股量价细项
+- 全市场个股量价：已补到 `2025-01-02` 至 `2026-04-07`
+- 全量概念指数：已补到 `2025-01-02` 至 `2026-04-07`
+- 全量概念成员映射：已按 `2026-04-07` 快照补齐
+- 主营行业临时映射：仍可补出 `map / frequency`，但尚未升级成正式 `industry reps`
 
 ### 6.2 `event_news`
 
@@ -221,6 +235,9 @@ PY
    - `docs/analysis/`
 6. 如需继续同步
    - 个股量价：`event_quant_sync.py sync-stock-file`
+   - 全市场个股量价：`event_quant_sync.py sync-all-stocks`
+   - 全量概念指数：`event_quant_sync.py sync-all-concepts`
+   - 全量概念成员映射：`event_quant_sync.py sync-all-concept-members`
    - 概念映射 + 概念指数：`event_quant_sync.py sync-stock-file-concepts`
 
 ### 7.1 从项目内 dump 恢复数据库

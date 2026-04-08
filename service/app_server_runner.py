@@ -192,12 +192,17 @@ def _handle_notification(
     if method == "turn/started":
         _update_progress(task_store, task_id, state, stage="turn_started")
         return None
-    if method == "item/commandExecution/outputDelta" and isinstance(params, dict):
+    if method in {"item/commandExecution/outputDelta", "command/exec/outputDelta"} and isinstance(params, dict):
         delta = str(params.get("delta", ""))
         if delta:
             _append_log(log_path, "[command_output_delta]", delta)
         _update_progress(task_store, task_id, state)
         return None
+    if method == "item/completed" and isinstance(params, dict):
+        item = params.get("item")
+        if isinstance(item, dict) and item.get("type") == "agentMessage" and item.get("phase") == "final_answer":
+            _update_progress(task_store, task_id, state)
+            return {"status": "completed", "error": ""}
     if method == "turn/completed" and isinstance(params, dict):
         turn = params.get("turn")
         if not isinstance(turn, dict):
@@ -333,7 +338,9 @@ def run_app_server_task(
                 "method": "initialize",
                 "params": {
                     "clientInfo": {"name": "attribution-service", "version": "0.1.0"},
-                    "capabilities": None,
+                    "capabilities": {
+                        "experimentalApi": True,
+                    },
                 },
             },
             log_path,
@@ -357,57 +364,29 @@ def run_app_server_task(
             {
                 "jsonrpc": "2.0",
                 "id": request_id,
-                "method": "newConversation",
+                "method": "thread/start",
                 "params": {
                     "model": None,
                     "modelProvider": None,
-                    "profile": None,
                     "cwd": str(root),
                     "approvalPolicy": "never",
                     "sandbox": "danger-full-access",
                     "config": None,
+                    "serviceName": None,
                     "baseInstructions": build_codex_base_instructions(),
                     "developerInstructions": build_codex_developer_instructions(),
-                    "compactPrompt": None,
-                    "includeApplyPatchTool": True,
-                },
-            },
-            log_path,
-        )
-        conversation = _wait_for_response(
-            process,
-            request_id=request_id,
-            request_method="newConversation",
-            deadline=deadline,
-            task_store=task_store,
-            task_id=task.task_id,
-            log_path=log_path,
-            state=state,
-            monotonic=monotonic,
-            sleep=sleep,
-        )
-        conversation_id = str(conversation.get("conversationId", ""))
-        if not conversation_id:
-            raise RuntimeError("codex app-server missing conversationId")
-
-        request_id += 1
-        _write_request(
-            process,
-            {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": "addConversationListener",
-                "params": {
-                    "conversationId": conversation_id,
+                    "personality": None,
+                    "ephemeral": False,
                     "experimentalRawEvents": True,
+                    "persistExtendedHistory": True,
                 },
             },
             log_path,
         )
-        _wait_for_response(
+        thread_result = _wait_for_response(
             process,
             request_id=request_id,
-            request_method="addConversationListener",
+            request_method="thread/start",
             deadline=deadline,
             task_store=task_store,
             task_id=task.task_id,
@@ -416,6 +395,10 @@ def run_app_server_task(
             monotonic=monotonic,
             sleep=sleep,
         )
+        thread = thread_result.get("thread")
+        thread_id = str(thread.get("id", "")) if isinstance(thread, dict) else ""
+        if not thread_id:
+            raise RuntimeError("codex app-server missing thread id")
 
         request_id += 1
         _write_request(
@@ -423,16 +406,14 @@ def run_app_server_task(
             {
                 "jsonrpc": "2.0",
                 "id": request_id,
-                "method": "sendUserMessage",
+                "method": "turn/start",
                 "params": {
-                    "conversationId": conversation_id,
-                    "items": [
+                    "threadId": thread_id,
+                    "input": [
                         {
                             "type": "text",
-                            "data": {
-                                "text": build_codex_prompt(task),
-                                "text_elements": [],
-                            },
+                            "text": build_codex_prompt(task),
+                            "text_elements": [],
                         }
                     ],
                 },
@@ -442,7 +423,7 @@ def run_app_server_task(
         _wait_for_response(
             process,
             request_id=request_id,
-            request_method="sendUserMessage",
+            request_method="turn/start",
             deadline=deadline,
             task_store=task_store,
             task_id=task.task_id,

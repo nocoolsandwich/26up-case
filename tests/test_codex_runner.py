@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from subprocess import CalledProcessError, TimeoutExpired
 
-from service.codex_runner import build_codex_command, build_codex_prompt, build_skill_run_command, run_codex_task
+from service.codex_runner import (
+    build_codex_command,
+    build_codex_prompt,
+    build_finalize_agent_rerank_command,
+    build_prepare_agent_rerank_command,
+    build_skill_run_command,
+    run_codex_task,
+)
 from service.models import AttributionTask, TaskStatus
 from service.task_store import TaskStore
 
@@ -24,9 +31,39 @@ def test_build_codex_prompt_contains_skill_and_task_context() -> None:
     assert "2025-09-10" in prompt
     assert "2026-03-09" in prompt
     assert "docs/analysis" in prompt
-    assert "直接在项目根目录执行下面这条命令" in prompt
-    assert "python skills/stock-wave-attribution/scripts/orchestrator.py run" in prompt
-    assert "当前默认不启用 ChatGPT 补强链路" in prompt
+    assert "prepare-agent-rerank" in prompt
+    assert "finalize-agent-rerank" in prompt
+    assert "100 选 3-5" in prompt
+    assert "直接精选最终 10 条" in prompt
+    assert "不要逐条打分" in prompt
+    assert "final_selection.json" in prompt
+    assert "ChatGPT" not in prompt
+
+
+def test_build_agent_rerank_commands_use_direct_orchestrator_entry() -> None:
+    task = AttributionTask(
+        task_id="attr-003a",
+        stock_name="腾景科技",
+        ts_code="688195.SH",
+        start_date="2025-09-10",
+        end_date="2026-03-09",
+        sample_label="数据中心",
+    )
+
+    prepare_command = build_prepare_agent_rerank_command(task)
+    finalize_command = build_finalize_agent_rerank_command(task)
+
+    assert "python" in prepare_command
+    assert "orchestrator.py" in prepare_command
+    assert "prepare-agent-rerank" in prepare_command
+    assert "--task-id" in prepare_command
+    assert "attr-003a" in prepare_command
+
+    assert "python" in finalize_command
+    assert "orchestrator.py" in finalize_command
+    assert "finalize-agent-rerank" in finalize_command
+    assert "final_selection.json" in finalize_command
+    assert "--task-id" in finalize_command
 
 
 def test_build_codex_command_wraps_prompt_for_codex_cli() -> None:
@@ -116,7 +153,7 @@ def test_run_codex_task_marks_failure_and_records_error(tmp_path) -> None:
     assert updated.stage == "codex_failed"
 
 
-def test_run_codex_task_backfills_report_plot_and_chatgpt_task_id(tmp_path) -> None:
+def test_run_codex_task_backfills_report_plot_and_progress(tmp_path) -> None:
     store = TaskStore(tmp_path / "service_tasks")
     task = AttributionTask(
         task_id="attr-005b",
@@ -133,19 +170,17 @@ def test_run_codex_task_backfills_report_plot_and_chatgpt_task_id(tmp_path) -> N
         plot_dir = tmp_path / "data" / "plots"
         report_dir.mkdir(parents=True, exist_ok=True)
         plot_dir.mkdir(parents=True, exist_ok=True)
+        (plot_dir / "688375_SH_orchestrator.png").write_text("png", encoding="utf-8")
         (report_dir / "2026-03-25-688375SH-国博电子-wave-attribution.md").write_text(
             "\n".join(
                 [
-                    "### ChatGPT 联网归因",
-                    "- task id：",
-                    "  `d7b0a15f-688a-41af-b738-ec8d9ab5290a`",
-                    "- 结果文件：",
-                    "  `skills/chatgpt-plus-browser/.state/d7b0a15f-688a-41af-b738-ec8d9ab5290a.json`",
+                    "# 国博电子波段归因",
+                    "",
+                    "![](../../data/plots/688375_SH_orchestrator.png)",
                 ]
             ),
             encoding="utf-8",
         )
-        (plot_dir / "688375_SH_wave_candles.png").write_text("png", encoding="utf-8")
 
         class Result:
             stdout = "\n".join(
@@ -162,8 +197,8 @@ def test_run_codex_task_backfills_report_plot_and_chatgpt_task_id(tmp_path) -> N
 
     assert updated.status == TaskStatus.COMPLETED
     assert updated.report_path.endswith("2026-03-25-688375SH-国博电子-wave-attribution.md")
-    assert updated.plot_path.endswith("688375_SH_wave_candles.png")
-    assert updated.chatgpt_task_id == "d7b0a15f-688a-41af-b738-ec8d9ab5290a"
+    assert updated.plot_path.endswith("688375_SH_orchestrator.png")
+    assert updated.chatgpt_task_id == ""
     assert updated.log_path.endswith("attr-005b.log")
     assert updated.progress_summary == '最近命令: sed -n "1,40p" SKILL.md'
     assert updated.last_event_type == "item.completed"

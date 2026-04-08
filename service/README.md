@@ -12,6 +12,8 @@
 
 ## 当前能力
 
+- `GET /health/datastores`
+  - 查询 `event_news / event_quant` 是否可连，以及关键锚点表是否存在
 - `POST /tasks/attribution`
   - 创建归因任务
 - `GET /tasks/{task_id}`
@@ -19,9 +21,9 @@
 - `GET /tasks/{task_id}/result`
   - 查询结果路径
 - `POST /tasks/{task_id}/run`
-  - 触发任务执行，并在成功后回写报告路径、图片路径、日志路径、进度摘要和可识别的 ChatGPT task id
+  - 触发任务执行，并在成功后回写报告路径、图片路径、日志路径和进度摘要
 - `POST /tasks/{task_id}/retry-chatgpt`
-  - 检查 ChatGPT 会话后准备续跑联网步骤
+  - 历史兼容接口，当前正式服务链默认不使用
 
 ## 当前约束
 
@@ -45,21 +47,44 @@ uvicorn service.app:app --reload
 
 - 报告：`docs/analysis/`
 - 图片：`data/plots/`
-- ChatGPT state：`skills/chatgpt-plus-browser/.state/`
+- 粗排工件：`data/service_tasks/<task-id>/agent_rerank/`
 
 ## 当前执行口径
 
 - `/tasks/{task_id}/run` 通过 `Codex App Server` 驱动 `stock-wave-attribution`
-- 服务 prompt 默认不是让 Codex 自己探索仓库，而是直接执行：
+- `/tasks/{task_id}/run` 开始前会先做数据库预检
+  - 当前检查：
+    - `event_news` 可连接且存在 `event_metadata`
+    - `event_quant` 可连接且存在 `raw_stock_daily_qfq`
+  - 若失败，任务直接回写：
+    - `status=failed`
+    - `stage=datastore_health_check_failed`
+    - `error=<明确失败原因>`
+- 服务 prompt 默认不是让 Codex 自己探索仓库，而是直接执行两阶段链路：
 
 ```bash
-python skills/stock-wave-attribution/scripts/orchestrator.py run \
+python skills/stock-wave-attribution/scripts/orchestrator.py prepare-agent-rerank \
   --stock-name <名称> \
   --ts-code <代码> \
   --start-date <开始日期> \
   --end-date <结束日期> \
-  --sample-label <标签>
+  --sample-label <标签> \
+  --task-id <任务ID>
+
+python skills/stock-wave-attribution/scripts/orchestrator.py finalize-agent-rerank \
+  --stock-name <名称> \
+  --ts-code <代码> \
+  --start-date <开始日期> \
+  --end-date <结束日期> \
+  --sample-label <标签> \
+  --task-id <任务ID> \
+  --selection-path data/service_tasks/<任务ID>/agent_rerank/final_selection.json
 ```
+
+- 两阶段之间由 Codex 读取 `summary.json` 和各波段 `rough_chunks/chunk_*.md`
+  - 每个 chunk 直接 `100选3-5`
+  - 不做逐条打分
+  - 再从粗排并集里直接精选最终 10 条
 
 - App Server 会话会显式注入收敛后的 `baseInstructions / developerInstructions`
   - 默认禁止先做无关 skill 阅读和全仓库扫描
@@ -85,5 +110,29 @@ python skills/stock-wave-attribution/scripts/orchestrator.py run \
   - `plot_path`
   - `log_path`
   - `chatgpt_task_id`
+- `chatgpt_task_id` 目前只作为历史兼容字段保留；正式服务链默认为空
 - `plot_path` 以正式报告里的图片引用为优先真相源；只有报告里没有图片引用时，才退回固定命名规则
 - `chatgpt_task_id` 优先读取任务对象；为空时，再尝试从报告中的 `.state/<task-id>.json` 路径提取
+
+## 数据库异常时先查什么
+
+默认先查服务层暴露的预检接口：
+
+```bash
+curl http://127.0.0.1:8000/health/datastores
+```
+
+如果返回 `ok=false`，再去看：
+
+```bash
+brew services list | grep postgresql@16
+python - <<'PY'
+import socket
+s = socket.socket()
+s.settimeout(1)
+print(s.connect_ex(('127.0.0.1', 5432)))
+s.close()
+PY
+```
+
+确认 `5432` 已监听后，再按 [docs/project-datastores.md](/Users/zhengshenghua/Library/Mobile%20Documents/com~apple~CloudDocs/work/my/case_data/docs/project-datastores.md) 的恢复步骤检查数据库和 dump。 

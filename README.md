@@ -38,6 +38,9 @@
   - [scripts/wave_segmentation.py](./scripts/wave_segmentation.py)
   - [scripts/wave_plotting.py](./scripts/wave_plotting.py)
   - [scripts/attribution_data.py](./scripts/attribution_data.py)
+  - 其中 `event_quant_sync.py sync-all-stocks` 用于按交易日批量同步全市场个股量价包
+  - 其中 `event_quant_sync.py sync-all-concepts` 用于批量同步全量同花顺概念指数
+  - 其中 `event_quant_sync.py sync-all-concept-members` 用于批量同步全量同花顺概念成员映射
 - 项目内 skills：
   - [skills/chatgpt-plus-browser](./skills/chatgpt-plus-browser/)
   - [skills/stock-wave-attribution](./skills/stock-wave-attribution/)

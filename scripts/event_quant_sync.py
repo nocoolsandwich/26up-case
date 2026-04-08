@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import time
 from collections import OrderedDict
@@ -36,6 +37,12 @@ DEFAULT_MAX_WORKERS = 4
 DEFAULT_CASE_SHEET_NAME = "案例库"
 DEFAULT_CASE_STOCK_BUNDLE_JOB_NAME = "sync_case_stock_bundle"
 DEFAULT_CASE_STOCK_BUNDLE_TARGET_KEY = "case_stocks"
+DEFAULT_ALL_STOCKS_JOB_NAME = "sync_all_stocks_by_trade_date"
+DEFAULT_ALL_STOCKS_TARGET_KEY = "all_stocks"
+DEFAULT_ALL_CONCEPTS_JOB_NAME = "sync_all_concepts"
+DEFAULT_ALL_CONCEPTS_TARGET_KEY = "all_concepts"
+DEFAULT_ALL_CONCEPT_MEMBERS_JOB_NAME = "sync_all_concept_members"
+DEFAULT_ALL_CONCEPT_MEMBERS_TARGET_KEY = "all_concept_members"
 DEFAULT_TUSHARE_HTTP_URL = "http://lianghua.nanyangqiankun.top"
 DEFAULT_DB_DSN = None
 
@@ -176,6 +183,14 @@ def build_stock_resume_plan(
     return plan
 
 
+def build_code_resume_plan(codes: list[str], last_cursor: str | None) -> list[str]:
+    cursor_code, _ = parse_state_cursor(last_cursor)
+    if not cursor_code or cursor_code not in codes:
+        return codes
+    start_idx = codes.index(cursor_code) + 1
+    return codes[start_idx:]
+
+
 def load_case_stock_names(workbook_path: str | Path, sheet_name: str = DEFAULT_CASE_SHEET_NAME) -> list[str]:
     workbook = load_workbook(filename=workbook_path, read_only=True, data_only=True)
     try:
@@ -259,6 +274,20 @@ def build_stock_bundle_sync_config(
         "start_date": start_date,
         "stock_codes": deduped_codes,
     }
+
+
+def build_trade_date_resume_plan(
+    trade_dates: list[str],
+    last_cursor: str | None,
+    overlap_days: int = 7,
+) -> list[str]:
+    if not last_cursor:
+        return trade_dates
+    _, cursor_date = parse_state_cursor(last_cursor)
+    resumed_start = compute_resume_start_date(cursor_date, overlap_days=overlap_days)
+    if not resumed_start:
+        return trade_dates
+    return [trade_date for trade_date in trade_dates if trade_date >= resumed_start]
 
 
 def run_case_stock_bundle_sync(
@@ -367,6 +396,106 @@ def run_stock_concept_bundle_sync(
             sleeper(sleep_seconds)
 
 
+def run_concept_daily_sync(
+    sync_config: dict[str, object],
+    last_cursor: str | None,
+    fetch_concept_daily_bundle: Callable[[str, str, str], dict[str, pd.DataFrame]],
+    persist_frames: Callable[[str, dict[str, pd.DataFrame]], None],
+    persist_sync_state: Callable[[dict[str, object]], None],
+    end_date: str,
+    overlap_days: int = 7,
+    sleep_seconds: float = 0.0,
+    sleeper: Callable[[float], None] | None = None,
+) -> None:
+    sleeper = sleeper or time.sleep
+    concept_codes = list(sync_config["concept_codes"])
+    latest_success_cursor: str | None = last_cursor
+    plan = build_stock_resume_plan(
+        stock_codes=concept_codes,
+        requested_start_date=str(sync_config["start_date"]),
+        last_cursor=last_cursor,
+        overlap_days=overlap_days,
+    )
+    for concept_code, start_date in plan:
+        try:
+            frames = fetch_concept_daily_bundle(concept_code, start_date, end_date)
+            persist_frames(concept_code, frames)
+            latest_success_cursor = format_state_cursor(concept_code, _normalize_cursor_date(end_date))
+            persist_sync_state(
+                {
+                    "job_name": sync_config["job_name"],
+                    "target_table": "raw_ths_concept_daily",
+                    "target_key": sync_config["target_key"],
+                    "last_success_cursor": latest_success_cursor,
+                    "last_success_at": datetime.now(),
+                    "status": "success",
+                    "error_message": None,
+                }
+            )
+        except Exception as exc:
+            persist_sync_state(
+                {
+                    "job_name": sync_config["job_name"],
+                    "target_table": "raw_ths_concept_daily",
+                    "target_key": sync_config["target_key"],
+                    "last_success_cursor": latest_success_cursor,
+                    "last_success_at": datetime.now(),
+                    "status": "failed",
+                    "error_message": str(exc),
+                }
+            )
+            raise
+        if sleep_seconds > 0:
+            sleeper(sleep_seconds)
+
+
+def run_concept_member_sync(
+    sync_config: dict[str, object],
+    last_cursor: str | None,
+    fetch_concept_member_bundle: Callable[[str], dict[str, pd.DataFrame]],
+    persist_frames: Callable[[str, dict[str, pd.DataFrame]], None],
+    persist_sync_state: Callable[[dict[str, object]], None],
+    end_date: str,
+    sleep_seconds: float = 0.0,
+    sleeper: Callable[[float], None] | None = None,
+) -> None:
+    sleeper = sleeper or time.sleep
+    concept_codes = list(sync_config["concept_codes"])
+    latest_success_cursor: str | None = last_cursor
+    plan = build_code_resume_plan(concept_codes, last_cursor)
+    for concept_code in plan:
+        try:
+            frames = fetch_concept_member_bundle(concept_code)
+            persist_frames(concept_code, frames)
+            latest_success_cursor = format_state_cursor(concept_code, _normalize_cursor_date(end_date))
+            persist_sync_state(
+                {
+                    "job_name": sync_config["job_name"],
+                    "target_table": "raw_ths_member",
+                    "target_key": sync_config["target_key"],
+                    "last_success_cursor": latest_success_cursor,
+                    "last_success_at": datetime.now(),
+                    "status": "success",
+                    "error_message": None,
+                }
+            )
+        except Exception as exc:
+            persist_sync_state(
+                {
+                    "job_name": sync_config["job_name"],
+                    "target_table": "raw_ths_member",
+                    "target_key": sync_config["target_key"],
+                    "last_success_cursor": latest_success_cursor,
+                    "last_success_at": datetime.now(),
+                    "status": "failed",
+                    "error_message": str(exc),
+                }
+            )
+            raise
+        if sleep_seconds > 0:
+            sleeper(sleep_seconds)
+
+
 def _normalize_cursor_date(date_text: str) -> str:
     if "-" in date_text:
         return date_text
@@ -379,6 +508,34 @@ def create_tushare_client(token: str, http_url: str = DEFAULT_TUSHARE_HTTP_URL):
     pro._DataApi__token = token
     pro._DataApi__http_url = http_url
     return pro
+
+
+def list_open_trade_dates(pro, start_date: str, end_date: str) -> list[str]:
+    trade_cal_df = pro.trade_cal(exchange="", start_date=start_date, end_date=end_date, is_open=1)
+    if trade_cal_df is None or trade_cal_df.empty:
+        return []
+    return sorted(trade_cal_df["cal_date"].astype(str).dropna().tolist())
+
+
+def load_latest_adj_factor_snapshot(
+    pro,
+    anchor_trade_date: str,
+    per_request_sleep_seconds: float = 0.0,
+    sleeper: Callable[[float], None] | None = None,
+) -> dict[str, float]:
+    sleeper = sleeper or time.sleep
+    logger.info("开始抓取全市场最新复权因子快照: trade_date=%s", anchor_trade_date)
+    adj_factor_df = call_with_rate_limit_retry(lambda: pro.adj_factor(trade_date=anchor_trade_date))
+    if per_request_sleep_seconds > 0:
+        sleeper(per_request_sleep_seconds)
+    if adj_factor_df is None or adj_factor_df.empty:
+        raise ValueError(f"未获取到 {anchor_trade_date} 的全市场复权因子快照")
+    result = {
+        str(row.ts_code): float(row.adj_factor)
+        for row in adj_factor_df[["ts_code", "adj_factor"]].dropna().itertuples(index=False)
+    }
+    logger.info("全市场最新复权因子快照抓取完成: trade_date=%s stocks=%s", anchor_trade_date, len(result))
+    return result
 
 
 @contextmanager
@@ -525,6 +682,152 @@ def persist_frames_to_db(conn, ts_code: str, frames: dict[str, pd.DataFrame]) ->
     conn.commit()
 
 
+def build_market_qfq_daily_frame(
+    daily_df: pd.DataFrame,
+    adj_factor_df: pd.DataFrame,
+    latest_adj_factor_map: dict[str, float],
+) -> pd.DataFrame:
+    if daily_df is None or daily_df.empty:
+        return _empty_stock_daily_qfq_frame()
+
+    required_columns = {"ts_code", "trade_date", "adj_factor"}
+    if adj_factor_df is None or adj_factor_df.empty or not required_columns.issubset(set(adj_factor_df.columns)):
+        logger.warning("全市场切片缺少 adj_factor，回退为原始日线价格: rows=%s", len(daily_df))
+        return normalize_stock_daily_qfq(daily_df)
+
+    merged = daily_df.merge(
+        adj_factor_df[["ts_code", "trade_date", "adj_factor"]],
+        on=["ts_code", "trade_date"],
+        how="left",
+    )
+    latest_factor = merged["ts_code"].map(latest_adj_factor_map)
+    latest_factor = latest_factor.where(latest_factor.notna(), merged["adj_factor"])
+    factor_scale = pd.Series(1.0, index=merged.index, dtype="float64")
+    valid_mask = merged["adj_factor"].notna() & latest_factor.notna() & (latest_factor != 0)
+    factor_scale.loc[valid_mask] = merged.loc[valid_mask, "adj_factor"] / latest_factor.loc[valid_mask]
+
+    merged["open_qfq"] = merged["open"] * factor_scale
+    merged["high_qfq"] = merged["high"] * factor_scale
+    merged["low_qfq"] = merged["low"] * factor_scale
+    merged["close_qfq"] = merged["close"] * factor_scale
+
+    return merged[
+        [
+            "ts_code",
+            "trade_date",
+            "open_qfq",
+            "high_qfq",
+            "low_qfq",
+            "close_qfq",
+            "pct_chg",
+            "vol",
+            "amount",
+        ]
+    ].copy()
+
+
+def fetch_market_trade_date_bundle(
+    pro,
+    trade_date: str,
+    latest_adj_factor_map: dict[str, float],
+    per_request_sleep_seconds: float = 0.0,
+    sleeper: Callable[[float], None] | None = None,
+    max_workers: int = DEFAULT_MAX_WORKERS,
+) -> dict[str, pd.DataFrame]:
+    sleeper = sleeper or time.sleep
+
+    def _call(func: Callable[[], object]):
+        result = call_with_rate_limit_retry(func)
+        if per_request_sleep_seconds > 0:
+            sleeper(per_request_sleep_seconds)
+        return result
+
+    logger.info("开始抓取全市场日切片: trade_date=%s", trade_date)
+    call_specs: OrderedDict[str, Callable[[], object]] = OrderedDict(
+        [
+            ("daily", lambda: pro.daily(trade_date=trade_date)),
+            ("adj_factor", lambda: pro.adj_factor(trade_date=trade_date)),
+            ("daily_basic", lambda: pro.daily_basic(trade_date=trade_date)),
+            ("moneyflow", lambda: pro.moneyflow(trade_date=trade_date)),
+            ("limit_list_d", lambda: pro.limit_list_d(trade_date=trade_date)),
+        ]
+    )
+
+    results: dict[str, object] = {}
+    workers = max(1, min(max_workers, len(call_specs)))
+    if workers == 1:
+        for name, func in call_specs.items():
+            results[name] = _call(func)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {
+                executor.submit(_call, func): name
+                for name, func in call_specs.items()
+            }
+            for future, name in future_map.items():
+                results[name] = future.result()
+
+    daily_df = results["daily"]
+    adj_factor_df = results["adj_factor"]
+    daily_basic_df = results["daily_basic"]
+    moneyflow_df = results["moneyflow"]
+    limit_list_df = results["limit_list_d"]
+    bundle = {
+        "raw_stock_daily_qfq": build_market_qfq_daily_frame(daily_df, adj_factor_df, latest_adj_factor_map),
+        "raw_daily_basic": normalize_daily_basic(daily_basic_df) if daily_basic_df is not None and not daily_basic_df.empty else _empty_daily_basic_frame(),
+        "raw_moneyflow": normalize_moneyflow(moneyflow_df) if moneyflow_df is not None and not moneyflow_df.empty else _empty_moneyflow_frame(),
+        "raw_limit_list_d": normalize_limit_list_d(limit_list_df) if limit_list_df is not None and not limit_list_df.empty else _empty_limit_list_frame(),
+    }
+    logger.info(
+        "全市场日切片抓取完成: trade_date=%s rows=%s",
+        trade_date,
+        {name: len(frame) for name, frame in bundle.items()},
+    )
+    return bundle
+
+
+def run_market_trade_date_sync(
+    sync_config: dict[str, object],
+    last_cursor: str | None,
+    fetch_trade_date_bundle: Callable[[str], dict[str, pd.DataFrame]],
+    persist_frames: Callable[[str, dict[str, pd.DataFrame]], None],
+    persist_sync_state: Callable[[dict[str, object]], None],
+    overlap_days: int = 7,
+) -> None:
+    trade_dates = list(sync_config["trade_dates"])
+    latest_success_cursor: str | None = last_cursor
+    plan = build_trade_date_resume_plan(trade_dates=trade_dates, last_cursor=last_cursor, overlap_days=overlap_days)
+    for trade_date in plan:
+        try:
+            frames = fetch_trade_date_bundle(trade_date)
+            persist_frames(trade_date, frames)
+            latest_success_cursor = _normalize_cursor_date(trade_date)
+            persist_sync_state(
+                {
+                    "job_name": sync_config["job_name"],
+                    "target_table": "raw_stock_daily_qfq",
+                    "target_key": sync_config["target_key"],
+                    "last_success_cursor": latest_success_cursor,
+                    "last_success_at": datetime.now(),
+                    "status": "success",
+                    "error_message": None,
+                }
+            )
+        except Exception as exc:
+            persist_sync_state(
+                {
+                    "job_name": sync_config["job_name"],
+                    "target_table": "raw_stock_daily_qfq",
+                    "target_key": sync_config["target_key"],
+                    "last_success_cursor": latest_success_cursor,
+                    "last_success_at": datetime.now(),
+                    "status": "failed",
+                    "error_message": str(exc),
+                }
+            )
+            raise
+
+
 def fetch_stock_concept_bundle(
     pro,
     concept_code: str,
@@ -583,6 +886,158 @@ def fetch_stock_concept_bundle(
         "ana_stock_concept_map": normalize_ana_stock_concept_map(raw_member, concept_meta),
         "ana_concept_day": normalize_ana_concept_day(raw_concept_daily),
     }
+
+
+def fetch_concept_daily_bundle(
+    pro,
+    concept_code: str,
+    concept_name: str,
+    start_date: str,
+    end_date: str,
+    per_request_sleep_seconds: float = 0.0,
+    sleeper: Callable[[float], None] | None = None,
+) -> dict[str, pd.DataFrame]:
+    sleeper = sleeper or time.sleep
+
+    def _call(func: Callable[[], object]):
+        result = call_with_rate_limit_retry(func)
+        if per_request_sleep_seconds > 0:
+            sleeper(per_request_sleep_seconds)
+        return result
+
+    logger.info(
+        "开始抓取概念指数包[Tushare]: concept_code=%s concept_name=%s start_date=%s end_date=%s",
+        concept_code,
+        concept_name,
+        start_date,
+        end_date,
+    )
+    concept_daily_df = _call(lambda: pro.ths_daily(ts_code=concept_code, start_date=start_date, end_date=end_date))
+    raw_concept_daily = (
+        normalize_ths_concept_daily(concept_daily_df, concept_name)
+        if concept_daily_df is not None and not concept_daily_df.empty
+        else pd.DataFrame(columns=["ts_code", "trade_date", "concept_name", "open", "high", "low", "close", "pct_change", "vol", "turnover_rate"])
+    )
+    frames = {
+        "raw_ths_concept_daily": raw_concept_daily,
+        "ana_concept_day": normalize_ana_concept_day(raw_concept_daily),
+    }
+    logger.info(
+        "概念指数包抓取完成[Tushare]: concept_code=%s rows=%s",
+        concept_code,
+        {name: len(frame) for name, frame in frames.items()},
+    )
+    return frames
+
+
+def fetch_case_stock_concept_bundle_from_tushare(
+    ts_code: str,
+    start_date: str,
+    end_date: str,
+    token: str,
+    http_url: str = DEFAULT_TUSHARE_HTTP_URL,
+    pro=None,
+    per_request_sleep_seconds: float = 0.0,
+    sleeper: Callable[[float], None] | None = None,
+) -> dict[str, pd.DataFrame]:
+    sleeper = sleeper or time.sleep
+    pro = pro or create_tushare_client(token=token, http_url=http_url)
+    mapping_asof_date = end_date
+
+    def _call(func: Callable[[], object]):
+        result = call_with_rate_limit_retry(func)
+        if per_request_sleep_seconds > 0:
+            sleeper(per_request_sleep_seconds)
+        return result
+
+    logger.info(
+        "开始抓取股票概念包[Tushare]: ts_code=%s start_date=%s end_date=%s http_url=%s",
+        ts_code,
+        start_date,
+        end_date,
+        http_url,
+    )
+    index_df = _call(lambda: pro.ths_index())
+    member_frame, concept_frame = build_theme_concept_matches(
+        index_df=index_df,
+        stock_codes=[ts_code],
+        fetch_members=lambda concept_code: _call(lambda: pro.ths_member(ts_code=concept_code)),
+        mapping_asof_date=mapping_asof_date,
+    )
+    if member_frame.empty or concept_frame.empty:
+        empty_member = pd.DataFrame(columns=["ts_code", "con_code", "con_name", "mapping_asof_date"])
+        empty_concepts = pd.DataFrame(columns=["concept_code", "trade_date", "concept_name", "close", "pct_change", "vol", "turnover_rate"])
+        empty_map = pd.DataFrame(columns=["ts_code", "concept_code", "concept_name", "mapping_asof_date", "map_source", "updated_at"])
+        return {
+            "raw_ths_member": empty_member,
+            "raw_ths_concept_daily": pd.DataFrame(columns=["ts_code", "trade_date", "concept_name", "open", "high", "low", "close", "pct_change", "vol", "turnover_rate"]),
+            "ana_stock_concept_map": empty_map,
+            "ana_concept_day": empty_concepts,
+        }
+
+    raw_daily_frames: list[pd.DataFrame] = []
+    for row in concept_frame.itertuples(index=False):
+        concept_daily_df = _call(lambda: pro.ths_daily(ts_code=row.concept_code, start_date=start_date, end_date=end_date))
+        if concept_daily_df is None or concept_daily_df.empty:
+            continue
+        raw_daily_frames.append(normalize_ths_concept_daily(concept_daily_df, row.concept_name))
+
+    raw_concept_daily = (
+        pd.concat(raw_daily_frames, ignore_index=True).drop_duplicates(subset=["ts_code", "trade_date"]).reset_index(drop=True)
+        if raw_daily_frames
+        else pd.DataFrame(columns=["ts_code", "trade_date", "concept_name", "open", "high", "low", "close", "pct_change", "vol", "turnover_rate"])
+    )
+    return {
+        "raw_ths_member": member_frame,
+        "raw_ths_concept_daily": raw_concept_daily,
+        "ana_stock_concept_map": normalize_ana_stock_concept_map(member_frame, concept_frame),
+        "ana_concept_day": normalize_ana_concept_day(raw_concept_daily),
+    }
+
+
+def fetch_concept_member_bundle(
+    pro,
+    concept_code: str,
+    concept_name: str,
+    mapping_asof_date: str,
+    per_request_sleep_seconds: float = 0.0,
+    sleeper: Callable[[float], None] | None = None,
+) -> dict[str, pd.DataFrame]:
+    sleeper = sleeper or time.sleep
+
+    def _call(func: Callable[[], object]):
+        result = call_with_rate_limit_retry(func)
+        if per_request_sleep_seconds > 0:
+            sleeper(per_request_sleep_seconds)
+        return result
+
+    logger.info(
+        "开始抓取概念成员包[Tushare]: concept_code=%s concept_name=%s mapping_asof_date=%s",
+        concept_code,
+        concept_name,
+        mapping_asof_date,
+    )
+    member_df = _call(lambda: pro.ths_member(ts_code=concept_code))
+    if member_df is None or member_df.empty:
+        empty_member = pd.DataFrame(columns=["ts_code", "con_code", "con_name", "mapping_asof_date"])
+        empty_map = pd.DataFrame(columns=["ts_code", "concept_code", "concept_name", "mapping_asof_date", "map_source", "updated_at"])
+        return {
+            "raw_ths_member": empty_member,
+            "ana_stock_concept_map": empty_map,
+        }
+
+    raw_member = normalize_ths_member(member_df, mapping_asof_date)
+    concept_meta = pd.DataFrame([{"concept_code": concept_code, "concept_name": concept_name}])
+    frames = {
+        "raw_ths_member": raw_member,
+        "ana_stock_concept_map": normalize_ana_stock_concept_map(raw_member, concept_meta),
+    }
+    logger.info(
+        "概念成员包抓取完成[Tushare]: concept_code=%s rows=%s",
+        concept_code,
+        {name: len(frame) for name, frame in frames.items()},
+    )
+    return frames
 
 
 def sync_stock_file_concepts_to_db(
@@ -649,6 +1104,134 @@ def sync_stock_file_concepts_to_db(
             persist_sync_state=_persist_state,
             end_date=end_date,
             overlap_days=overlap_days,
+            sleep_seconds=0.0,
+        )
+    return sync_config
+
+
+def sync_all_concepts_to_db(
+    start_date: str,
+    end_date: str,
+    token: str,
+    job_name: str = DEFAULT_ALL_CONCEPTS_JOB_NAME,
+    target_key: str = DEFAULT_ALL_CONCEPTS_TARGET_KEY,
+    db_dsn: str = DEFAULT_DB_DSN,
+    http_url: str = DEFAULT_TUSHARE_HTTP_URL,
+    requests_per_min: int = DEFAULT_FEATURE_REQUESTS_PER_MIN,
+    overlap_days: int = 7,
+    per_request_sleep_seconds: float | None = None,
+) -> dict[str, object]:
+    pro = create_tushare_client(token=token, http_url=http_url)
+    index_df = filter_ths_index_targets(pro.ths_index())
+    concept_codes = index_df["ts_code"].astype(str).tolist()
+    concept_name_map = dict(zip(index_df["ts_code"], index_df["name"]))
+    sync_config = {
+        "job_name": job_name,
+        "target_key": target_key,
+        "start_date": start_date,
+        "end_date": end_date,
+        "concept_codes": concept_codes,
+    }
+    sleep_seconds = requests_per_min_to_sleep_seconds(requests_per_min)
+    per_request_sleep_seconds = per_request_sleep_seconds if per_request_sleep_seconds is not None else sleep_seconds
+
+    with psycopg.connect(db_dsn) as conn:
+        state = load_sync_state(
+            conn,
+            job_name=str(sync_config["job_name"]),
+            target_table="raw_ths_concept_daily",
+            target_key=str(sync_config["target_key"]),
+        )
+        last_cursor = state["last_success_cursor"] if state else None
+
+        def _fetch(concept_code: str, planned_start_date: str, planned_end_date: str) -> dict[str, pd.DataFrame]:
+            return fetch_concept_daily_bundle(
+                pro=pro,
+                concept_code=concept_code,
+                concept_name=concept_name_map[concept_code],
+                start_date=planned_start_date,
+                end_date=planned_end_date,
+                per_request_sleep_seconds=per_request_sleep_seconds,
+            )
+
+        def _persist_frames(concept_code: str, frames: dict[str, pd.DataFrame]) -> None:
+            persist_frames_to_db(conn, concept_code, frames)
+
+        def _persist_state(payload: dict[str, object]) -> None:
+            persist_sync_state_row(conn, payload)
+
+        run_concept_daily_sync(
+            sync_config=sync_config,
+            last_cursor=last_cursor,
+            fetch_concept_daily_bundle=_fetch,
+            persist_frames=_persist_frames,
+            persist_sync_state=_persist_state,
+            end_date=end_date,
+            overlap_days=overlap_days,
+            sleep_seconds=0.0,
+        )
+    return sync_config
+
+
+def sync_all_concept_members_to_db(
+    start_date: str,
+    end_date: str,
+    token: str,
+    job_name: str = DEFAULT_ALL_CONCEPT_MEMBERS_JOB_NAME,
+    target_key: str = DEFAULT_ALL_CONCEPT_MEMBERS_TARGET_KEY,
+    db_dsn: str = DEFAULT_DB_DSN,
+    http_url: str = DEFAULT_TUSHARE_HTTP_URL,
+    requests_per_min: int = DEFAULT_FEATURE_REQUESTS_PER_MIN,
+    overlap_days: int = 7,
+    per_request_sleep_seconds: float | None = None,
+) -> dict[str, object]:
+    del start_date, overlap_days
+    pro = create_tushare_client(token=token, http_url=http_url)
+    index_df = filter_ths_index_targets(pro.ths_index())
+    concept_codes = index_df["ts_code"].astype(str).tolist()
+    concept_name_map = dict(zip(index_df["ts_code"], index_df["name"]))
+    sync_config = {
+        "job_name": job_name,
+        "target_key": target_key,
+        "start_date": end_date,
+        "end_date": end_date,
+        "concept_codes": concept_codes,
+    }
+    sleep_seconds = requests_per_min_to_sleep_seconds(requests_per_min)
+    per_request_sleep_seconds = per_request_sleep_seconds if per_request_sleep_seconds is not None else sleep_seconds
+    mapping_asof_date = end_date
+
+    with psycopg.connect(db_dsn) as conn:
+        state = load_sync_state(
+            conn,
+            job_name=str(sync_config["job_name"]),
+            target_table="raw_ths_member",
+            target_key=str(sync_config["target_key"]),
+        )
+        last_cursor = state["last_success_cursor"] if state else None
+
+        def _fetch(concept_code: str) -> dict[str, pd.DataFrame]:
+            return fetch_concept_member_bundle(
+                pro=pro,
+                concept_code=concept_code,
+                concept_name=concept_name_map[concept_code],
+                mapping_asof_date=mapping_asof_date,
+                per_request_sleep_seconds=per_request_sleep_seconds,
+            )
+
+        def _persist_frames(concept_code: str, frames: dict[str, pd.DataFrame]) -> None:
+            persist_frames_to_db(conn, concept_code, frames)
+
+        def _persist_state(payload: dict[str, object]) -> None:
+            persist_sync_state_row(conn, payload)
+
+        run_concept_member_sync(
+            sync_config=sync_config,
+            last_cursor=last_cursor,
+            fetch_concept_member_bundle=_fetch,
+            persist_frames=_persist_frames,
+            persist_sync_state=_persist_state,
+            end_date=end_date,
             sleep_seconds=0.0,
         )
     return sync_config
@@ -775,6 +1358,72 @@ def sync_stock_file_bundle_to_db(
     return sync_config
 
 
+def sync_all_stocks_by_trade_date_to_db(
+    start_date: str,
+    end_date: str,
+    token: str,
+    job_name: str = DEFAULT_ALL_STOCKS_JOB_NAME,
+    target_key: str = DEFAULT_ALL_STOCKS_TARGET_KEY,
+    db_dsn: str = DEFAULT_DB_DSN,
+    http_url: str = DEFAULT_TUSHARE_HTTP_URL,
+    requests_per_min: int = DEFAULT_FEATURE_REQUESTS_PER_MIN,
+    overlap_days: int = 7,
+    per_request_sleep_seconds: float | None = None,
+    max_workers: int = DEFAULT_MAX_WORKERS,
+) -> dict[str, object]:
+    pro = create_tushare_client(token=token, http_url=http_url)
+    trade_dates = list_open_trade_dates(pro, start_date=start_date, end_date=end_date)
+    if not trade_dates:
+        raise ValueError(f"未找到 {start_date} 到 {end_date} 的开市交易日")
+    sleep_seconds = requests_per_min_to_sleep_seconds(requests_per_min)
+    per_request_sleep_seconds = per_request_sleep_seconds if per_request_sleep_seconds is not None else sleep_seconds
+    latest_adj_factor_map = load_latest_adj_factor_snapshot(
+        pro,
+        anchor_trade_date=trade_dates[-1],
+        per_request_sleep_seconds=per_request_sleep_seconds,
+    )
+    sync_config = {
+        "job_name": job_name,
+        "target_key": target_key,
+        "start_date": start_date,
+        "end_date": end_date,
+        "trade_dates": trade_dates,
+    }
+    with psycopg.connect(db_dsn) as conn:
+        state = load_sync_state(
+            conn,
+            job_name=str(sync_config["job_name"]),
+            target_table="raw_stock_daily_qfq",
+            target_key=str(sync_config["target_key"]),
+        )
+        last_cursor = state["last_success_cursor"] if state else None
+
+        def _fetch(trade_date: str) -> dict[str, pd.DataFrame]:
+            return fetch_market_trade_date_bundle(
+                pro,
+                trade_date=trade_date,
+                latest_adj_factor_map=latest_adj_factor_map,
+                per_request_sleep_seconds=per_request_sleep_seconds,
+                max_workers=max_workers,
+            )
+
+        def _persist_frames(trade_date: str, frames: dict[str, pd.DataFrame]) -> None:
+            persist_frames_to_db(conn, trade_date, frames)
+
+        def _persist_state(payload: dict[str, object]) -> None:
+            persist_sync_state_row(conn, payload)
+
+        run_market_trade_date_sync(
+            sync_config=sync_config,
+            last_cursor=last_cursor,
+            fetch_trade_date_bundle=_fetch,
+            persist_frames=_persist_frames,
+            persist_sync_state=_persist_state,
+            overlap_days=overlap_days,
+        )
+    return sync_config
+
+
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="同步 event_quant 的 Tushare 数据")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -815,6 +1464,40 @@ def build_argument_parser() -> argparse.ArgumentParser:
     concept_parser.add_argument("--http-url", default=None, help="Tushare 代理地址")
     concept_parser.add_argument("--requests-per-min", type=int, default=20, help="每分钟请求上限")
     concept_parser.add_argument("--overlap-days", type=int, default=7, help="断点续传回补天数")
+
+    all_stocks_parser = subparsers.add_parser("sync-all-stocks", help="按交易日同步全市场股票包")
+    all_stocks_parser.add_argument("--start-date", required=True, help="开始日期，格式 YYYYMMDD")
+    all_stocks_parser.add_argument("--end-date", required=True, help="结束日期，格式 YYYYMMDD")
+    all_stocks_parser.add_argument("--job-name", default=DEFAULT_ALL_STOCKS_JOB_NAME, help="同步任务名")
+    all_stocks_parser.add_argument("--target-key", default=DEFAULT_ALL_STOCKS_TARGET_KEY, help="同步目标键")
+    all_stocks_parser.add_argument("--token", default=None, help="Tushare token")
+    all_stocks_parser.add_argument("--db-dsn", default=None, help="PostgreSQL DSN")
+    all_stocks_parser.add_argument("--http-url", default=None, help="Tushare 代理地址")
+    all_stocks_parser.add_argument("--requests-per-min", type=int, default=DEFAULT_FEATURE_REQUESTS_PER_MIN, help="每分钟请求上限")
+    all_stocks_parser.add_argument("--overlap-days", type=int, default=7, help="断点续传回补天数")
+    all_stocks_parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS, help="单交易日并发请求数")
+
+    all_concepts_parser = subparsers.add_parser("sync-all-concepts", help="同步全量同花顺概念指数")
+    all_concepts_parser.add_argument("--start-date", required=True, help="开始日期，格式 YYYYMMDD")
+    all_concepts_parser.add_argument("--end-date", required=True, help="结束日期，格式 YYYYMMDD")
+    all_concepts_parser.add_argument("--job-name", default=DEFAULT_ALL_CONCEPTS_JOB_NAME, help="同步任务名")
+    all_concepts_parser.add_argument("--target-key", default=DEFAULT_ALL_CONCEPTS_TARGET_KEY, help="同步目标键")
+    all_concepts_parser.add_argument("--token", default=None, help="Tushare token")
+    all_concepts_parser.add_argument("--db-dsn", default=None, help="PostgreSQL DSN")
+    all_concepts_parser.add_argument("--http-url", default=None, help="Tushare 代理地址")
+    all_concepts_parser.add_argument("--requests-per-min", type=int, default=DEFAULT_FEATURE_REQUESTS_PER_MIN, help="每分钟请求上限")
+    all_concepts_parser.add_argument("--overlap-days", type=int, default=7, help="断点续传回补天数")
+
+    all_concept_members_parser = subparsers.add_parser("sync-all-concept-members", help="同步全量同花顺概念成员映射")
+    all_concept_members_parser.add_argument("--start-date", required=True, help="开始日期，格式 YYYYMMDD")
+    all_concept_members_parser.add_argument("--end-date", required=True, help="结束日期，格式 YYYYMMDD")
+    all_concept_members_parser.add_argument("--job-name", default=DEFAULT_ALL_CONCEPT_MEMBERS_JOB_NAME, help="同步任务名")
+    all_concept_members_parser.add_argument("--target-key", default=DEFAULT_ALL_CONCEPT_MEMBERS_TARGET_KEY, help="同步目标键")
+    all_concept_members_parser.add_argument("--token", default=None, help="Tushare token")
+    all_concept_members_parser.add_argument("--db-dsn", default=None, help="PostgreSQL DSN")
+    all_concept_members_parser.add_argument("--http-url", default=None, help="Tushare 代理地址")
+    all_concept_members_parser.add_argument("--requests-per-min", type=int, default=DEFAULT_FEATURE_REQUESTS_PER_MIN, help="每分钟请求上限")
+    all_concept_members_parser.add_argument("--overlap-days", type=int, default=7, help="断点续传回补天数")
     return parser
 
 
@@ -878,6 +1561,55 @@ def main(argv: list[str] | None = None) -> int:
             overlap_days=args.overlap_days,
         )
         logger.info("股票清单概念同步完成: %s", sync_config)
+        return 0
+    if args.command == "sync-all-stocks":
+        if not token:
+            parser.error("缺少 --token 或项目配置 tushare.token")
+        sync_config = sync_all_stocks_by_trade_date_to_db(
+            start_date=args.start_date,
+            end_date=args.end_date,
+            token=token,
+            job_name=args.job_name,
+            target_key=args.target_key,
+            db_dsn=db_dsn,
+            http_url=http_url,
+            requests_per_min=args.requests_per_min,
+            overlap_days=args.overlap_days,
+            max_workers=args.max_workers,
+        )
+        logger.info("全市场股票包同步完成: %s", sync_config)
+        return 0
+    if args.command == "sync-all-concepts":
+        if not token:
+            parser.error("缺少 --token 或项目配置 tushare.token")
+        sync_config = sync_all_concepts_to_db(
+            start_date=args.start_date,
+            end_date=args.end_date,
+            token=token,
+            job_name=args.job_name,
+            target_key=args.target_key,
+            db_dsn=db_dsn,
+            http_url=http_url,
+            requests_per_min=args.requests_per_min,
+            overlap_days=args.overlap_days,
+        )
+        logger.info("全量概念指数同步完成: %s", sync_config)
+        return 0
+    if args.command == "sync-all-concept-members":
+        if not token:
+            parser.error("缺少 --token 或项目配置 tushare.token")
+        sync_config = sync_all_concept_members_to_db(
+            start_date=args.start_date,
+            end_date=args.end_date,
+            token=token,
+            job_name=args.job_name,
+            target_key=args.target_key,
+            db_dsn=db_dsn,
+            http_url=http_url,
+            requests_per_min=args.requests_per_min,
+            overlap_days=args.overlap_days,
+        )
+        logger.info("全量概念成员映射同步完成: %s", sync_config)
         return 0
     parser.error(f"不支持的命令: {args.command}")
     return 1
@@ -1048,7 +1780,6 @@ def build_akshare_limit_list_frame(
     ).dropna()
     rows: list[dict[str, object]] = []
     positive_days = sorted(trade_df.loc[trade_df["pct_chg"] >= 4.5, "trade_date"].unique())
-    negative_days = sorted(trade_df.loc[trade_df["pct_chg"] <= -4.5, "trade_date"].unique())
     for trade_date in positive_days:
         try:
             day_df = ak_client.stock_zt_pool_em(date=trade_date)
@@ -1070,29 +1801,6 @@ def build_akshare_limit_list_frame(
                 "last_time": row.get("最后封板时间"),
                 "open_times": row.get("炸板次数", 0),
                 "limit_status": "U",
-            }
-        )
-    for trade_date in negative_days:
-        try:
-            day_df = ak_client.stock_zt_pool_dtgc_em(date=trade_date)
-        except Exception as exc:
-            logger.warning("Akshare 跌停池拉取失败，跳过该日: ts_code=%s trade_date=%s error=%s", ts_code, trade_date, exc)
-            continue
-        if day_df is None or day_df.empty:
-            continue
-        hit = day_df.loc[day_df["代码"].astype(str) == symbol]
-        if hit.empty:
-            continue
-        row = hit.iloc[0]
-        rows.append(
-            {
-                "ts_code": ts_code,
-                "trade_date": datetime.strptime(trade_date, "%Y%m%d").strftime("%Y-%m-%d"),
-                "fd_amount": row.get("封单资金"),
-                "first_time": None,
-                "last_time": row.get("最后封板时间"),
-                "open_times": row.get("开板次数", 0),
-                "limit_status": "D",
             }
         )
     if not rows:
@@ -1145,6 +1853,166 @@ def fetch_case_stock_bundle_from_akshare(
         "raw_daily_basic": build_akshare_daily_basic_frame(hist_df, ts_code),
         "raw_moneyflow": build_akshare_moneyflow_frame(moneyflow_df, ts_code, start_date, end_date),
         "raw_limit_list_d": build_akshare_limit_list_frame(hist_df, ts_code, ak_client),
+    }
+
+
+def _empty_ana_stock_concept_map_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=["ts_code", "concept_code", "concept_name", "mapping_asof_date", "map_source", "updated_at"]
+    )
+
+
+def _empty_ana_concept_day_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=["concept_code", "trade_date", "concept_name", "close", "pct_change", "vol", "turnover_rate"])
+
+
+def normalize_em_stock_concept_map(
+    *,
+    ts_code: str,
+    concept_code: str,
+    concept_name: str,
+    mapping_asof_date: str,
+    updated_at: str | None = None,
+) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "ts_code": ts_code,
+                "concept_code": concept_code,
+                "concept_name": concept_name,
+                "mapping_asof_date": pd.to_datetime(mapping_asof_date).strftime("%Y-%m-%d"),
+                "map_source": "akshare_em_concept",
+                "updated_at": updated_at or datetime.now().isoformat(),
+            }
+        ]
+    )
+
+
+def normalize_em_concept_day(df: pd.DataFrame, concept_code: str, concept_name: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return _empty_ana_concept_day_frame()
+    result = df.rename(
+        columns={
+            "日期": "trade_date",
+            "收盘": "close",
+            "涨跌幅": "pct_change",
+            "成交量": "vol",
+            "换手率": "turnover_rate",
+        }
+    )[["trade_date", "close", "pct_change", "vol", "turnover_rate"]].copy()
+    result.insert(0, "concept_code", concept_code)
+    result.insert(2, "concept_name", concept_name)
+    result["trade_date"] = pd.to_datetime(result["trade_date"]).dt.strftime("%Y-%m-%d")
+    return result
+
+
+def fetch_case_stock_concept_bundle_from_akshare(
+    ts_code: str,
+    start_date: str,
+    end_date: str,
+    concept_name_fetcher: Callable[[], pd.DataFrame] | None = None,
+    concept_cons_fetcher: Callable[..., pd.DataFrame] | None = None,
+    concept_hist_fetcher: Callable[..., pd.DataFrame] | None = None,
+    ak_client=None,
+    per_request_sleep_seconds: float = 0.0,
+    sleeper: Callable[[float], None] | None = None,
+) -> dict[str, pd.DataFrame]:
+    ak_client = ak_client or ak
+    if ak_client is None:
+        raise RuntimeError("Akshare 不可用")
+
+    concept_name_fetcher = concept_name_fetcher or ak_client.stock_board_concept_name_em
+    concept_cons_fetcher = concept_cons_fetcher or ak_client.stock_board_concept_cons_em
+    concept_hist_fetcher = concept_hist_fetcher or ak_client.stock_board_concept_hist_em
+    sleeper = sleeper or time.sleep
+
+    symbol, _ = resolve_akshare_stock_params(ts_code)
+    logger.info(
+        "开始抓取概念包[Akshare]: ts_code=%s symbol=%s start_date=%s end_date=%s",
+        ts_code,
+        symbol,
+        start_date,
+        end_date,
+    )
+
+    def _load_concept_names() -> pd.DataFrame:
+        return concept_name_fetcher()
+
+    try:
+        with requests_sessions_without_proxy():
+            concept_name_df = call_with_rate_limit_retry(_load_concept_names)
+    except Exception:
+        logger.warning(
+            "Akshare 概念列表无代理请求失败，回退到默认网络环境: ts_code=%s symbol=%s",
+            ts_code,
+            symbol,
+        )
+        concept_name_df = call_with_rate_limit_retry(_load_concept_names)
+
+    if concept_name_df is None or concept_name_df.empty:
+        return {
+            "ana_stock_concept_map": _empty_ana_stock_concept_map_frame(),
+            "ana_concept_day": _empty_ana_concept_day_frame(),
+        }
+
+    concept_name_df = concept_name_df.dropna(subset=["板块代码", "板块名称"]).copy()
+    mapping_frames: list[pd.DataFrame] = []
+    concept_day_frames: list[pd.DataFrame] = []
+
+    for row in concept_name_df[["板块代码", "板块名称"]].itertuples(index=False):
+        concept_code = str(row.板块代码)
+        concept_name = str(row.板块名称)
+
+        def _load_cons() -> pd.DataFrame:
+            return concept_cons_fetcher(symbol=concept_code)
+
+        cons_df = call_with_rate_limit_retry(_load_cons)
+        if per_request_sleep_seconds > 0:
+            sleeper(per_request_sleep_seconds)
+        if cons_df is None or cons_df.empty or "代码" not in cons_df.columns:
+            continue
+        codes = cons_df["代码"].astype(str).str.extract(r"(\d+)")[0].fillna("").str.zfill(6)
+        if symbol not in set(codes.tolist()):
+            continue
+
+        mapping_frames.append(
+            normalize_em_stock_concept_map(
+                ts_code=ts_code,
+                concept_code=concept_code,
+                concept_name=concept_name,
+                mapping_asof_date=end_date,
+            )
+        )
+
+        def _load_hist() -> pd.DataFrame:
+            return concept_hist_fetcher(
+                symbol=concept_name,
+                period="daily",
+                start_date=start_date,
+                end_date=end_date,
+                adjust="",
+            )
+
+        hist_df = call_with_rate_limit_retry(_load_hist)
+        if per_request_sleep_seconds > 0:
+            sleeper(per_request_sleep_seconds)
+        concept_day_frames.append(normalize_em_concept_day(hist_df, concept_code, concept_name))
+
+    if not mapping_frames:
+        return {
+            "ana_stock_concept_map": _empty_ana_stock_concept_map_frame(),
+            "ana_concept_day": _empty_ana_concept_day_frame(),
+        }
+
+    return {
+        "ana_stock_concept_map": pd.concat(mapping_frames, ignore_index=True)
+        .drop_duplicates(subset=["ts_code", "concept_code"])
+        .reset_index(drop=True),
+        "ana_concept_day": pd.concat(concept_day_frames, ignore_index=True)
+        .drop_duplicates(subset=["concept_code", "trade_date"])
+        .reset_index(drop=True)
+        if concept_day_frames
+        else _empty_ana_concept_day_frame(),
     }
 
 

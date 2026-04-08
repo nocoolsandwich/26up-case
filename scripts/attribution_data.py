@@ -11,8 +11,8 @@ DEFAULT_NEWS_SOURCES = (
     "zsxq_zhuwang",
     "zsxq_damao",
     "zsxq_saidao_touyan",
-    "wscn_live",
 )
+DEFAULT_MAX_WINDOW_EDGE_GAP_DAYS = 10
 MARKET_BENCHMARKS = [
     ("000001.SH", "上证指数"),
     ("399001.SZ", "深证成指"),
@@ -72,6 +72,34 @@ def fetch_stock_window_bundle(conn, ts_code: str, start_date: str, end_date: str
             columns = [desc[0] for desc in cur.description]
             frames[table_name] = pd.DataFrame(cur.fetchall(), columns=columns)
     return frames
+
+
+def validate_stock_window_coverage(
+    stock_bundle: Mapping[str, pd.DataFrame],
+    ts_code: str,
+    start_date: str,
+    end_date: str,
+    max_edge_gap_days: int = DEFAULT_MAX_WINDOW_EDGE_GAP_DAYS,
+) -> None:
+    stock_df = stock_bundle.get("raw_stock_daily_qfq")
+    if stock_df is None or stock_df.empty:
+        raise ValueError(f"未获取到 {ts_code} 在 {start_date} 到 {end_date} 的量价数据")
+
+    trade_dates = pd.to_datetime(stock_df["trade_date"]).sort_values().reset_index(drop=True)
+    actual_start = trade_dates.iloc[0]
+    actual_end = trade_dates.iloc[-1]
+    requested_start = pd.Timestamp(start_date)
+    requested_end = pd.Timestamp(end_date)
+
+    start_gap_days = (actual_start.normalize() - requested_start.normalize()).days
+    end_gap_days = (requested_end.normalize() - actual_end.normalize()).days
+
+    if start_gap_days > max_edge_gap_days or end_gap_days > max_edge_gap_days:
+        raise ValueError(
+            "量价数据窗口被截断："
+            f"{ts_code} 请求 {start_date} -> {end_date}，"
+            f"实际仅覆盖 {actual_start.date()} -> {actual_end.date()}"
+        )
 
 
 def fetch_stock_concept_frames(

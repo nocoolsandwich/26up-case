@@ -7,6 +7,41 @@ from service.models import TaskStatus
 from service.app import create_app
 
 
+def test_get_datastore_health_returns_checker_payload(tmp_path) -> None:
+    def fake_datastore_health_checker() -> dict[str, object]:
+        return {
+            "ok": True,
+            "summary": "datastores healthy",
+            "datastores": [
+                {
+                    "name": "event_news",
+                    "ok": True,
+                    "required_tables": {"event_metadata": True},
+                },
+                {
+                    "name": "event_quant",
+                    "ok": True,
+                    "required_tables": {"raw_stock_daily_qfq": True},
+                },
+            ],
+        }
+
+    app = create_app(
+        task_root=tmp_path / "service_tasks",
+        workspace_root=tmp_path,
+        datastore_health_checker=fake_datastore_health_checker,
+    )
+    client = TestClient(app)
+
+    response = client.get("/health/datastores")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["summary"] == "datastores healthy"
+    assert payload["datastores"][0]["name"] == "event_news"
+
+
 def test_create_task_returns_task_id(tmp_path) -> None:
     app = create_app(task_root=tmp_path / "service_tasks", workspace_root=tmp_path)
     client = TestClient(app)
@@ -109,6 +144,51 @@ def test_run_task_marks_failure_when_codex_runner_raises(tmp_path) -> None:
     assert payload["status"] == "failed"
     assert payload["stage"] == "codex_failed"
     assert payload["error"] == "codex boom"
+
+
+def test_run_task_fails_fast_when_datastore_health_check_fails(tmp_path) -> None:
+    def fake_datastore_health_checker() -> dict[str, object]:
+        return {
+            "ok": False,
+            "summary": "event_news 连接失败: connection refused",
+            "datastores": [
+                {
+                    "name": "event_news",
+                    "ok": False,
+                    "error": "connection refused",
+                }
+            ],
+        }
+
+    def fake_codex_task_runner(task, task_store):
+        raise AssertionError("库预检失败时不应继续执行 codex runner")
+
+    app = create_app(
+        task_root=tmp_path / "service_tasks",
+        workspace_root=tmp_path,
+        datastore_health_checker=fake_datastore_health_checker,
+        codex_task_runner=fake_codex_task_runner,
+    )
+    client = TestClient(app)
+
+    created = client.post(
+        "/tasks/attribution",
+        json={
+            "stock_name": "腾景科技",
+            "ts_code": "688195.SH",
+            "start_date": "2025-09-10",
+            "end_date": "2026-03-09",
+            "sample_label": "数据中心",
+        },
+    ).json()
+
+    response = client.post(f"/tasks/{created['task_id']}/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "failed"
+    assert payload["stage"] == "datastore_health_check_failed"
+    assert payload["error"] == "event_news 连接失败: connection refused"
 
 
 def test_run_task_returns_backfilled_result_fields(tmp_path) -> None:

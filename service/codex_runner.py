@@ -18,7 +18,7 @@ def build_codex_base_instructions() -> str:
         "你正在执行 case_data 的单票波段归因服务任务。"
         "目标不是探索仓库，而是尽快完成一条正式归因链，"
         "并把结果文件都写回正式报告与任务状态，"
-        "包括报告、配图、ChatGPT 任务信息或失败占位。"
+        "包括报告、配图和必要的任务状态回写。"
     )
 
 
@@ -56,20 +56,95 @@ def build_skill_run_command(task: AttributionTask) -> str:
     )
 
 
+def _agent_rerank_root(task: AttributionTask) -> Path:
+    return Path("data") / "service_tasks" / task.task_id / "agent_rerank"
+
+
+def build_prepare_agent_rerank_command(task: AttributionTask) -> str:
+    return shlex.join(
+        [
+            "python",
+            "skills/stock-wave-attribution/scripts/orchestrator.py",
+            "prepare-agent-rerank",
+            "--stock-name",
+            task.stock_name,
+            "--ts-code",
+            task.ts_code,
+            "--start-date",
+            task.start_date,
+            "--end-date",
+            task.end_date,
+            "--sample-label",
+            task.sample_label,
+            "--task-id",
+            task.task_id,
+        ]
+    )
+
+
+def build_finalize_agent_rerank_command(task: AttributionTask) -> str:
+    return shlex.join(
+        [
+            "python",
+            "skills/stock-wave-attribution/scripts/orchestrator.py",
+            "finalize-agent-rerank",
+            "--stock-name",
+            task.stock_name,
+            "--ts-code",
+            task.ts_code,
+            "--start-date",
+            task.start_date,
+            "--end-date",
+            task.end_date,
+            "--sample-label",
+            task.sample_label,
+            "--task-id",
+            task.task_id,
+            "--selection-path",
+            str(_agent_rerank_root(task) / "final_selection.json"),
+        ]
+    )
+
+
 def build_codex_prompt(task: AttributionTask) -> str:
-    command = build_skill_run_command(task)
+    prepare_command = build_prepare_agent_rerank_command(task)
+    finalize_command = build_finalize_agent_rerank_command(task)
+    rerank_root = _agent_rerank_root(task)
+    summary_path = rerank_root / "summary.json"
+    selection_path = rerank_root / "final_selection.json"
     return (
-        "请不要先阅读 skill 文档或仓库代码，直接在项目根目录执行下面这条命令，并等待命令完成：\n"
-        f"{command}\n\n"
+        "请不要先全仓库探索，按下面这条正式服务链执行：\n\n"
+        "1. 先在项目根目录执行准备命令：\n"
+        f"{prepare_command}\n\n"
+        f"2. 阅读 `{summary_path.as_posix()}` 与各波段目录下的 `rough_chunks/chunk_*.md`。\n"
+        "- 对每个 chunk 直接选 3-5 条 item_id。\n"
+        "- 只做直接入围，不要逐条打分，不要输出分数。\n"
+        "- 优先启动前/启动期强信号，偏好存储涨价/供给收缩、长鑫/长江存储资本化与国产替代、AI 存储与端侧 AI 存储升级。\n"
+        f"- 把最终结果写入 `{selection_path.as_posix()}`。\n"
+        "- JSON 结构必须是：\n"
+        '{\n'
+        '  "one_liner": "一句话主逻辑",\n'
+        '  "waves": [\n'
+        '    {\n'
+        '      "wave_id": "W1",\n'
+        '      "one_line_logic": "该波段一句话逻辑",\n'
+        '      "final_picks": [\n'
+        '        {"item_id": "I00001", "role": "启动前强信号|启动期强化|中后段验证", "reason": "一句话原因"}\n'
+        "      ]\n"
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "3. 写完最终入围 JSON 后，执行收口命令：\n"
+        f"{finalize_command}\n\n"
         "任务说明：\n"
         f"- 标的：{task.stock_name}（{task.ts_code}）\n"
         f"- 分析窗口：{task.start_date} 到 {task.end_date}\n"
         f"- 样本标签：{task.sample_label}\n"
-        "- 该命令会按当前目录的 stock-wave-attribution skill 完整本地归因流程执行。\n"
-        "- 使用本地 PostgreSQL 的 event_quant / event_news 与 tushare。\n"
-        "- 当前默认不启用 ChatGPT 补强链路，按本地归因链完成即可。\n"
+        "- 使用本地 PostgreSQL 的 event_quant / event_news，与正式报告链路一致。\n"
+        "- 粗排标准：100 选 3-5。\n"
+        "- 精选标准：从粗排并集里直接精选最终 10 条，不做逐条打分。\n"
         "- 正式报告必须落到 docs/analysis，并生成配图到 data/plots。\n"
-        "- 如果命令首次失败，再只阅读最小必要文件定位原因，不要先做开放式探索。\n"
+        "- 如果命令失败，再只阅读最小必要文件定位原因，不要先做开放式探索。\n"
     )
 
 

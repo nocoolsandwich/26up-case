@@ -53,23 +53,29 @@ python3 skills/stock-wave-attribution/scripts/project_skill.py summary --json
 ## 特别规则
 
 - 数据源恢复、news 检索、概念验证优先复用 skill runtime 与宿主数据库资产
-- `本地 news 库证据` 先做候选召回，再做精排，不允许把命中的全部 news 直接写进报告
+- 量价数据必须 `数据库优先`
+- 当 `event_quant` 量价窗口不足时，必须先用 `Akshare` 补齐缺口并回写数据库，再重新从数据库读取，不允许直接拿 Akshare 结果跳过数据库落报告
+- 概念映射与概念日线也必须 `数据库优先`
+- 当 `ana_stock_concept_map / ana_concept_day` 对目标股票为空时，必须先用 `Tushare 代理` 回填数据库，再重新从数据库读取，不允许直接拿代理结果跳过数据库落报告
+- 服务模式下，`本地 news 库证据` 必须走两阶段：
+  - 先做候选召回与标题去重
+  - 再按 `100选3-5` 分 chunk 让 Codex 直接粗排
+  - 再从粗排并集里直接精选最终 10 条
+  - 粗排和精选都不做逐条打分
+- 本地 `run` 入口仍保留旧规则链，方便兼容回归，但正式服务默认不走 `run_chatgpt_browser`
+- 正式报告默认只分析 `涨幅 Top2` 的波段
 - news 候选来源至少覆盖：
   - `zsxq_zhuwang`
   - `zsxq_damao`
   - `zsxq_saidao_touyan`
-  - `wscn_live`
-- 精排默认优先：
-  - 离波段启动日更近的消息
-  - 直接提到标的的消息
-  - 与样本标签/核心概念强相关的标题与正文
-  - 去重后的高价值消息
-- `本地 news 库证据` 章节固定拆成两段：
-  - 先给元信息表：`序号 / 时间 / 来源 / 标题 / 链接`
-  - 再给逐条 `证据原文`
-- `事件时间线表` 只放精选后的摘要，不放整段原文全文
-- `证据原文` 必须用 fenced code block 原样放数据库全文，避免 Markdown 渲染器把多行原文打穿
+- 服务模式粗排窗口当前保持 `波段 start_date - 60 天 -> peak_date`
+- 正式报告按波段展开：
+  - 一级标题固定为 `波段 Wn`
+  - 每个波段下固定包含 `证据原文 / 量价验证表 / 概念联动验证表 / 结论与置信度表 / 综合裁决`
+- 波段概览必须包含 `粗排新闻来源分布`
+- `证据原文` 必须按发布时间升序展示，并用 fenced code block 原样放数据库全文，避免 Markdown 渲染器把多行原文打穿
 - 正式报告必须包含：
+  - `报告时间`
   - `一句话逻辑`
   - `综合裁决`
 - 默认本地归因链也必须直接给出：
@@ -78,17 +84,18 @@ python3 skills/stock-wave-attribution/scripts/project_skill.py summary --json
   - `最终判定`
   不能再写“待结合本地证据裁决”这类占位文案
 - 当前正式报告主因、备选、时间线和结论，默认由本地 `event_news / event_quant / tushare / 概念联动验证` 收口
-- ChatGPT 链路暂时不删除，但默认关闭
-- 如需恢复 ChatGPT 补强链路，优先通过 `stock-wave-attribution.yaml` 里的 `chatgpt.enabled` 显式开启
-- ChatGPT 开启后，才把 `chatgpt-plus-browser` 视为当前执行链的一部分
+- 历史 ChatGPT 链路暂时不删除，但默认关闭，也不属于正式服务链
 
 ## 当前真实调用链
 
 1. `runtime/wave_segmentation.py`
 2. `runtime/wave_plotting.py`
 3. `runtime/attribution_data.py`
-4. `skills/chatgpt-plus-browser/scripts/chatgpt_cdp.mjs`
-   - 仅当 `chatgpt.enabled = true` 时启用
+4. `scripts/orchestrator.py prepare-agent-rerank`
+5. `Codex service agent rerank`
+6. `scripts/orchestrator.py finalize-agent-rerank`
+7. `skills/chatgpt-plus-browser/scripts/chatgpt_cdp.mjs`
+   - 仅保留给历史兼容路径，当前正式服务默认不启用
 
 当前 orchestrator 文件：
 
@@ -105,4 +112,4 @@ python3 skills/stock-wave-attribution/scripts/project_skill.py summary --json
 ## 下一步
 
 1. 继续做真实样本端到端回归
-2. 再补量化数据 provider 灾备链
+2. 继续回归数据库优先、量价 Akshare / 概念 Tushare 代理补库兜底链路

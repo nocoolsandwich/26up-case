@@ -81,6 +81,15 @@
 
 行为：
 
+- 先执行一次数据库健康检查
+  - 当前会校验 `event_news` 与 `event_quant` 是否可连接
+  - 同时校验锚点表是否存在：
+    - `event_news.event_metadata`
+    - `event_quant.raw_stock_daily_qfq`
+- 若数据库预检失败，任务会直接返回：
+  - `status=failed`
+  - `stage=datastore_health_check_failed`
+  - `error=<明确失败原因>`
 - 将任务状态切到 `running`
 - 调用 `Codex App Server`
 - 由 `Codex App Server` 去驱动 `stock-wave-attribution`
@@ -111,6 +120,24 @@
   - `log_path`
   - `chatgpt_task_id`（若能从报告识别）
 - 若执行失败，返回 `failed` 和错误信息
+
+数据库预检失败示例：
+
+```json
+{
+  "task_id": "attr-xxx",
+  "status": "failed",
+  "stage": "datastore_health_check_failed",
+  "report_path": "",
+  "plot_path": "",
+  "log_path": "",
+  "chatgpt_task_id": "",
+  "progress_summary": "数据库健康检查失败",
+  "last_event_type": "",
+  "last_command": "",
+  "error": "event_news 连接或表校验失败: connection refused"
+}
+```
 
 成功返回示例：
 
@@ -185,6 +212,35 @@
   - `workspace_deactivated`
   - `logged_out`
   - `missing_composer`
+
+### 6. 查询数据库健康状态
+
+- 方法：`GET`
+- 路径：`/health/datastores`
+
+返回：
+
+```json
+{
+  "ok": true,
+  "summary": "event_news / event_quant 已就绪",
+  "config_path": "/abs/path/skills/stock-wave-attribution/stock-wave-attribution.yaml",
+  "datastores": [
+    {
+      "name": "event_news",
+      "ok": true,
+      "dsn": "postgresql://postgres:***@localhost:5432/event_news",
+      "current_database": "event_news",
+      "current_user": "postgres",
+      "latency_ms": 3.21,
+      "required_tables": {
+        "event_metadata": true
+      },
+      "error": ""
+    }
+  ]
+}
+```
 
 ## 当前约束
 

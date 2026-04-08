@@ -12,17 +12,26 @@ from scripts.event_quant_sync import (
     DEFAULT_FEATURE_REQUESTS_PER_MIN,
     DEFAULT_MAX_WORKERS,
     DEFAULT_REGULAR_REQUESTS_PER_MIN,
+    DEFAULT_ALL_CONCEPTS_JOB_NAME,
+    DEFAULT_ALL_CONCEPTS_TARGET_KEY,
+    DEFAULT_ALL_CONCEPT_MEMBERS_JOB_NAME,
+    DEFAULT_ALL_CONCEPT_MEMBERS_TARGET_KEY,
     build_argument_parser,
+    build_market_qfq_daily_frame,
+    build_code_resume_plan,
+    build_trade_date_resume_plan,
     build_theme_concept_matches,
     build_stock_resume_plan,
     build_sync_state_upsert_sql,
     build_upsert_sql,
     compute_resume_start_date,
+    fetch_market_trade_date_bundle,
     filter_ths_index_targets,
     format_state_cursor,
     is_tushare_rate_limit_error,
     is_tushare_retryable_error,
     load_case_stock_names,
+    load_latest_adj_factor_snapshot,
     load_stock_codes_from_csv,
     resolve_case_stock_codes,
     fetch_case_stock_bundle,
@@ -31,7 +40,12 @@ from scripts.event_quant_sync import (
     build_stock_bundle_sync_config,
     build_akshare_limit_list_frame,
     build_qfq_daily_frame,
+    fetch_concept_daily_bundle,
+    fetch_concept_member_bundle,
     fetch_case_stock_bundle_from_akshare,
+    fetch_case_stock_concept_bundle_from_tushare,
+    run_concept_daily_sync,
+    run_concept_member_sync,
     run_stock_concept_bundle_sync,
     run_case_stock_bundle_sync,
     parse_state_cursor,
@@ -80,6 +94,61 @@ class EventQuantSyncTest(unittest.TestCase):
             "demo-token",
         ])
 
+        self.assertIsNone(args.db_dsn)
+        self.assertIsNone(args.http_url)
+
+    def test_build_argument_parser_supports_sync_all_stocks(self):
+        parser = build_argument_parser()
+        args = parser.parse_args([
+            "sync-all-stocks",
+            "--start-date",
+            "20250101",
+            "--end-date",
+            "20260407",
+            "--token",
+            "demo-token",
+        ])
+
+        self.assertEqual(args.command, "sync-all-stocks")
+        self.assertEqual(args.job_name, "sync_all_stocks_by_trade_date")
+        self.assertEqual(args.target_key, "all_stocks")
+        self.assertEqual(args.max_workers, DEFAULT_MAX_WORKERS)
+        self.assertIsNone(args.db_dsn)
+        self.assertIsNone(args.http_url)
+
+    def test_build_argument_parser_supports_sync_all_concepts(self):
+        parser = build_argument_parser()
+        args = parser.parse_args([
+            "sync-all-concepts",
+            "--start-date",
+            "20250101",
+            "--end-date",
+            "20260407",
+            "--token",
+            "demo-token",
+        ])
+
+        self.assertEqual(args.command, "sync-all-concepts")
+        self.assertEqual(args.job_name, DEFAULT_ALL_CONCEPTS_JOB_NAME)
+        self.assertEqual(args.target_key, DEFAULT_ALL_CONCEPTS_TARGET_KEY)
+        self.assertIsNone(args.db_dsn)
+        self.assertIsNone(args.http_url)
+
+    def test_build_argument_parser_supports_sync_all_concept_members(self):
+        parser = build_argument_parser()
+        args = parser.parse_args([
+            "sync-all-concept-members",
+            "--start-date",
+            "20250101",
+            "--end-date",
+            "20260407",
+            "--token",
+            "demo-token",
+        ])
+
+        self.assertEqual(args.command, "sync-all-concept-members")
+        self.assertEqual(args.job_name, DEFAULT_ALL_CONCEPT_MEMBERS_JOB_NAME)
+        self.assertEqual(args.target_key, DEFAULT_ALL_CONCEPT_MEMBERS_TARGET_KEY)
         self.assertIsNone(args.db_dsn)
         self.assertIsNone(args.http_url)
 
@@ -493,6 +562,36 @@ class EventQuantSyncTest(unittest.TestCase):
             [("000001.SZ", "20240101"), ("000002.SZ", "20240101")],
         )
 
+    def test_build_code_resume_plan_skips_last_success_code(self):
+        plan = build_code_resume_plan(
+            ["885517.TI", "886042.TI", "886069.TI"],
+            last_cursor="886042.TI|2026-04-07",
+        )
+
+        self.assertEqual(plan, ["886069.TI"])
+
+    def test_build_trade_date_resume_plan_uses_overlap_window(self):
+        trade_dates = ["20250102", "20250103", "20250106", "20250107"]
+
+        plan = build_trade_date_resume_plan(
+            trade_dates=trade_dates,
+            last_cursor="2025-01-06",
+            overlap_days=3,
+        )
+
+        self.assertEqual(plan, ["20250103", "20250106", "20250107"])
+
+    def test_build_trade_date_resume_plan_without_cursor_returns_all_dates(self):
+        trade_dates = ["20250102", "20250103"]
+
+        plan = build_trade_date_resume_plan(
+            trade_dates=trade_dates,
+            last_cursor=None,
+            overlap_days=7,
+        )
+
+        self.assertEqual(plan, trade_dates)
+
     def test_requests_per_min_to_sleep_seconds_is_conservative(self):
         self.assertAlmostEqual(requests_per_min_to_sleep_seconds(100), 0.6)
         self.assertAlmostEqual(requests_per_min_to_sleep_seconds(20), 3.0)
@@ -766,6 +865,82 @@ class EventQuantSyncTest(unittest.TestCase):
         )
         self.assertEqual([item["status"] for item in state_updates], ["success", "success"])
 
+    def test_run_concept_member_sync_skips_last_success_cursor(self):
+        persisted = []
+        state_updates = []
+
+        def fetch_concept_member(concept_code: str) -> dict[str, pd.DataFrame]:
+            return {
+                "raw_ths_member": pd.DataFrame(
+                    [{"ts_code": concept_code, "con_code": "300476.SZ", "con_name": "胜宏科技", "mapping_asof_date": "2026-04-07"}]
+                ),
+                "ana_stock_concept_map": pd.DataFrame(
+                    [{"ts_code": "300476.SZ", "concept_code": concept_code, "concept_name": "机器人概念", "mapping_asof_date": "2026-04-07", "map_source": "ths_member", "updated_at": "2026-04-07T12:00:00+00:00"}]
+                ),
+            }
+
+        run_concept_member_sync(
+            sync_config={
+                "job_name": "sync_all_concept_members",
+                "target_key": "all_concept_members",
+                "start_date": "20260407",
+                "concept_codes": ["885517.TI", "886042.TI", "886069.TI"],
+            },
+            last_cursor="886042.TI|2026-04-07",
+            fetch_concept_member_bundle=fetch_concept_member,
+            persist_frames=lambda concept_code, frames: persisted.append((concept_code, sorted(frames))),
+            persist_sync_state=state_updates.append,
+            end_date="20260407",
+        )
+
+        self.assertEqual(
+            persisted,
+            [("886069.TI", ["ana_stock_concept_map", "raw_ths_member"])],
+        )
+        self.assertEqual([item["last_success_cursor"] for item in state_updates], ["886069.TI|2026-04-07"])
+        self.assertEqual([item["status"] for item in state_updates], ["success"])
+
+    def test_run_concept_daily_sync_updates_state_with_latest_concept_cursor(self):
+        persisted = []
+        state_updates = []
+
+        def fetch_concept_daily(concept_code: str, start_date: str, end_date: str) -> dict[str, pd.DataFrame]:
+            return {
+                "raw_ths_concept_daily": pd.DataFrame(
+                    [{"ts_code": concept_code, "trade_date": end_date, "concept_name": "机器人概念", "close": 1.0, "pct_change": 2.0, "vol": 3.0, "turnover_rate": 4.0}]
+                ),
+                "ana_concept_day": pd.DataFrame(
+                    [{"concept_code": concept_code, "trade_date": end_date, "concept_name": "机器人概念", "close": 1.0, "pct_change": 2.0, "vol": 3.0, "turnover_rate": 4.0}]
+                ),
+            }
+
+        run_concept_daily_sync(
+            sync_config={
+                "job_name": "sync_all_concepts",
+                "target_key": "all_concepts",
+                "start_date": "20250101",
+                "concept_codes": ["885517.TI", "886042.TI"],
+            },
+            last_cursor="885517.TI|2026-03-09",
+            fetch_concept_daily_bundle=fetch_concept_daily,
+            persist_frames=lambda concept_code, frames: persisted.append((concept_code, sorted(frames))),
+            persist_sync_state=state_updates.append,
+            end_date="20260407",
+        )
+
+        self.assertEqual(
+            persisted,
+            [
+                ("885517.TI", ["ana_concept_day", "raw_ths_concept_daily"]),
+                ("886042.TI", ["ana_concept_day", "raw_ths_concept_daily"]),
+            ],
+        )
+        self.assertEqual(
+            [item["last_success_cursor"] for item in state_updates],
+            ["885517.TI|2026-04-07", "886042.TI|2026-04-07"],
+        )
+        self.assertEqual([item["status"] for item in state_updates], ["success", "success"])
+
     def test_fetch_case_stock_bundle_uses_daily_and_adj_factor(self):
         calls = []
         sleep_calls = []
@@ -1032,13 +1207,159 @@ class EventQuantSyncTest(unittest.TestCase):
         self.assertEqual(state["hist_calls"], 2)
         self.assertEqual(len(frames["raw_stock_daily_qfq"]), 1)
 
-    def test_build_akshare_limit_list_frame_skips_unsupported_date_errors(self):
+    def test_fetch_case_stock_concept_bundle_from_tushare_returns_matched_concepts(self):
+        class FakePro:
+            def ths_index(self):
+                return pd.DataFrame(
+                    [
+                        {"ts_code": "886001.TI", "name": "算力PCB", "type": "N"},
+                        {"ts_code": "886999.TI", "name": "无关概念", "type": "N"},
+                    ]
+                )
+
+            def ths_member(self, ts_code):
+                if ts_code == "886001.TI":
+                    return pd.DataFrame(
+                        [
+                            {"ts_code": "886001.TI", "con_code": "300476.SZ", "con_name": "胜宏科技"},
+                        ]
+                    )
+                return pd.DataFrame(
+                    [
+                        {"ts_code": ts_code, "con_code": "000001.SZ", "con_name": "平安银行"},
+                    ]
+                )
+
+            def ths_daily(self, ts_code, start_date, end_date):
+                self.last_daily_args = (ts_code, start_date, end_date)
+                return pd.DataFrame(
+                    [
+                        {
+                            "ts_code": ts_code,
+                            "trade_date": "2025-01-02",
+                            "open": 100.0,
+                            "high": 103.0,
+                            "low": 99.0,
+                            "close": 101.0,
+                            "pct_change": 1.0,
+                            "vol": 10.0,
+                            "turnover_rate": 3.2,
+                        },
+                        {
+                            "ts_code": ts_code,
+                            "trade_date": "2026-04-07",
+                            "open": 130.0,
+                            "high": 132.0,
+                            "low": 129.0,
+                            "close": 131.0,
+                            "pct_change": 0.8,
+                            "vol": 12.0,
+                            "turnover_rate": 3.5,
+                        },
+                    ]
+                )
+
+        fake_pro = FakePro()
+        frames = fetch_case_stock_concept_bundle_from_tushare(
+            ts_code="300476.SZ",
+            start_date="20250101",
+            end_date="20260407",
+            token="demo-token",
+            http_url="http://example.com",
+            pro=fake_pro,
+        )
+
+        self.assertEqual(list(frames["ana_stock_concept_map"]["concept_code"]), ["886001.TI"])
+        self.assertEqual(list(frames["ana_stock_concept_map"]["map_source"]), ["ths_member"])
+        self.assertEqual(list(frames["ana_concept_day"]["concept_name"].unique()), ["算力PCB"])
+        self.assertEqual(fake_pro.last_daily_args, ("886001.TI", "20250101", "20260407"))
+
+    def test_fetch_concept_daily_bundle_returns_normalized_concept_frames(self):
+        sleep_calls = []
+
+        class FakePro:
+            def ths_daily(self, ts_code, start_date, end_date):
+                self.last_daily_args = (ts_code, start_date, end_date)
+                return pd.DataFrame(
+                    [
+                        {
+                            "ts_code": ts_code,
+                            "trade_date": "2025-01-02",
+                            "open": 100.0,
+                            "high": 103.0,
+                            "low": 99.0,
+                            "close": 101.0,
+                            "pct_change": 1.0,
+                            "vol": 10.0,
+                            "turnover_rate": 3.2,
+                        },
+                        {
+                            "ts_code": ts_code,
+                            "trade_date": "2026-04-07",
+                            "open": 130.0,
+                            "high": 132.0,
+                            "low": 129.0,
+                            "close": 131.0,
+                            "pct_change": 0.8,
+                            "vol": 12.0,
+                            "turnover_rate": 3.5,
+                        },
+                    ]
+                )
+
+        fake_pro = FakePro()
+        frames = fetch_concept_daily_bundle(
+            pro=fake_pro,
+            concept_code="886001.TI",
+            concept_name="算力PCB",
+            start_date="20250101",
+            end_date="20260407",
+            per_request_sleep_seconds=1.2,
+            sleeper=sleep_calls.append,
+        )
+
+        self.assertEqual(fake_pro.last_daily_args, ("886001.TI", "20250101", "20260407"))
+        self.assertEqual(list(frames["raw_ths_concept_daily"]["concept_name"].unique()), ["算力PCB"])
+        self.assertEqual(list(frames["ana_concept_day"]["concept_code"].unique()), ["886001.TI"])
+        self.assertEqual(sleep_calls, [1.2])
+
+    def test_fetch_concept_member_bundle_returns_full_member_frames(self):
+        sleep_calls = []
+
+        class FakePro:
+            def ths_member(self, ts_code):
+                self.last_member_args = ts_code
+                return pd.DataFrame(
+                    [
+                        {"ts_code": ts_code, "con_code": "300476.SZ", "con_name": "胜宏科技"},
+                        {"ts_code": ts_code, "con_code": "603667.SH", "con_name": "五洲新春"},
+                    ]
+                )
+
+        fake_pro = FakePro()
+        frames = fetch_concept_member_bundle(
+            pro=fake_pro,
+            concept_code="885517.TI",
+            concept_name="机器人概念",
+            mapping_asof_date="20260407",
+            per_request_sleep_seconds=0.8,
+            sleeper=sleep_calls.append,
+        )
+
+        self.assertEqual(fake_pro.last_member_args, "885517.TI")
+        self.assertEqual(len(frames["raw_ths_member"]), 2)
+        self.assertEqual(sorted(frames["ana_stock_concept_map"]["ts_code"].tolist()), ["300476.SZ", "603667.SH"])
+        self.assertEqual(list(frames["ana_stock_concept_map"]["concept_name"].unique()), ["机器人概念"])
+        self.assertEqual(sleep_calls, [0.8])
+
+    def test_build_akshare_limit_list_frame_only_uses_up_limit_pool(self):
         hist_df = pd.DataFrame(
             [
                 {"日期": pd.Timestamp("2025-01-03"), "涨跌幅": 10.0},
                 {"日期": pd.Timestamp("2025-01-06"), "涨跌幅": -9.8},
             ]
         )
+        calls = {"dtgc": 0}
 
         class FakeAk:
             def stock_zt_pool_em(self, **kwargs):
@@ -1055,12 +1376,14 @@ class EventQuantSyncTest(unittest.TestCase):
                 )
 
             def stock_zt_pool_dtgc_em(self, **kwargs):
-                raise ValueError("跌停股池只能获取最近 30 个交易日的数据")
+                calls["dtgc"] += 1
+                return pd.DataFrame()
 
         result = build_akshare_limit_list_frame(hist_df, "601869.SH", FakeAk())
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result.iloc[0]["limit_status"], "U")
+        self.assertEqual(calls["dtgc"], 0)
 
     def test_call_with_rate_limit_retry_retries_after_limit_error(self):
         calls = []
@@ -1091,6 +1414,174 @@ class EventQuantSyncTest(unittest.TestCase):
                 sleep_seconds=5.0,
                 sleeper=lambda _: None,
             )
+
+    def test_load_latest_adj_factor_snapshot_returns_code_to_factor_mapping(self):
+        sleep_calls = []
+
+        class FakePro:
+            def adj_factor(self, **kwargs):
+                self.last_kwargs = kwargs
+                return pd.DataFrame(
+                    [
+                        {"ts_code": "000001.SZ", "trade_date": "20260407", "adj_factor": 2.5},
+                        {"ts_code": "000002.SZ", "trade_date": "20260407", "adj_factor": 1.5},
+                    ]
+                )
+
+        fake_pro = FakePro()
+        result = load_latest_adj_factor_snapshot(
+            fake_pro,
+            anchor_trade_date="20260407",
+            per_request_sleep_seconds=1.2,
+            sleeper=sleep_calls.append,
+        )
+
+        self.assertEqual(fake_pro.last_kwargs, {"trade_date": "20260407"})
+        self.assertEqual(result, {"000001.SZ": 2.5, "000002.SZ": 1.5})
+        self.assertEqual(sleep_calls, [1.2])
+
+    def test_build_market_qfq_daily_frame_uses_latest_factor_map(self):
+        daily_df = pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20250102",
+                    "open": 20.0,
+                    "high": 22.0,
+                    "low": 19.0,
+                    "close": 21.0,
+                    "pct_chg": 5.0,
+                    "vol": 1000.0,
+                    "amount": 2000.0,
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "trade_date": "20250102",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.5,
+                    "close": 10.5,
+                    "pct_chg": 3.0,
+                    "vol": 500.0,
+                    "amount": 900.0,
+                },
+            ]
+        )
+        adj_factor_df = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "trade_date": "20250102", "adj_factor": 1.0},
+                {"ts_code": "000002.SZ", "trade_date": "20250102", "adj_factor": 2.0},
+            ]
+        )
+
+        result = build_market_qfq_daily_frame(
+            daily_df,
+            adj_factor_df,
+            latest_adj_factor_map={"000001.SZ": 2.0, "000002.SZ": 4.0},
+        )
+
+        self.assertEqual(list(result.columns), ["ts_code", "trade_date", "open_qfq", "high_qfq", "low_qfq", "close_qfq", "pct_chg", "vol", "amount"])
+        self.assertAlmostEqual(result.iloc[0]["close_qfq"], 10.5)
+        self.assertAlmostEqual(result.iloc[1]["close_qfq"], 5.25)
+
+    def test_fetch_market_trade_date_bundle_uses_trade_date_queries(self):
+        calls = []
+        sleep_calls = []
+
+        class FakePro:
+            def daily(self, **kwargs):
+                calls.append(("daily", kwargs))
+                return pd.DataFrame(
+                    [
+                        {
+                            "ts_code": "000001.SZ",
+                            "trade_date": "20260407",
+                            "open": 20.0,
+                            "high": 22.0,
+                            "low": 19.0,
+                            "close": 21.0,
+                            "pct_chg": 5.0,
+                            "vol": 1000.0,
+                            "amount": 2000.0,
+                        }
+                    ]
+                )
+
+            def adj_factor(self, **kwargs):
+                calls.append(("adj_factor", kwargs))
+                return pd.DataFrame(
+                    [
+                        {"ts_code": "000001.SZ", "trade_date": "20260407", "adj_factor": 2.0},
+                    ]
+                )
+
+            def daily_basic(self, **kwargs):
+                calls.append(("daily_basic", kwargs))
+                return pd.DataFrame(
+                    [
+                        {
+                            "ts_code": "000001.SZ",
+                            "trade_date": "20260407",
+                            "turnover_rate": 1.0,
+                            "turnover_rate_f": 1.1,
+                            "volume_ratio": 1.2,
+                            "pe": 10.0,
+                            "pb": 1.5,
+                            "total_mv": 100.0,
+                            "circ_mv": 80.0,
+                        }
+                    ]
+                )
+
+            def moneyflow(self, **kwargs):
+                calls.append(("moneyflow", kwargs))
+                return pd.DataFrame(
+                    [
+                        {
+                            "ts_code": "000001.SZ",
+                            "trade_date": "20260407",
+                            "buy_lg_amount": 1.0,
+                            "sell_lg_amount": 2.0,
+                            "buy_elg_amount": 3.0,
+                            "sell_elg_amount": 4.0,
+                            "net_mf_amount": 5.0,
+                        }
+                    ]
+                )
+
+            def limit_list_d(self, **kwargs):
+                calls.append(("limit_list_d", kwargs))
+                return pd.DataFrame(
+                    [
+                        {
+                            "ts_code": "000001.SZ",
+                            "trade_date": "20260407",
+                            "fd_amount": 1.0,
+                            "first_time": "093000",
+                            "last_time": "145700",
+                            "open_times": 0,
+                            "limit": "U",
+                        }
+                    ]
+                )
+
+        result = fetch_market_trade_date_bundle(
+            FakePro(),
+            trade_date="20260407",
+            latest_adj_factor_map={"000001.SZ": 2.0},
+            per_request_sleep_seconds=0.5,
+            sleeper=sleep_calls.append,
+            max_workers=1,
+        )
+
+        self.assertEqual(
+            [item[0] for item in calls],
+            ["daily", "adj_factor", "daily_basic", "moneyflow", "limit_list_d"],
+        )
+        self.assertTrue(all(item[1] == {"trade_date": "20260407"} for item in calls))
+        self.assertAlmostEqual(result["raw_stock_daily_qfq"].iloc[0]["close_qfq"], 21.0)
+        self.assertEqual(result["raw_limit_list_d"].iloc[0]["limit_status"], "U")
+        self.assertEqual(sleep_calls, [0.5, 0.5, 0.5, 0.5, 0.5])
 
     def test_build_qfq_daily_frame_uses_latest_adj_factor(self):
         daily_df = pd.DataFrame(

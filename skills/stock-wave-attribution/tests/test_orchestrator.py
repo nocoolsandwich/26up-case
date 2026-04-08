@@ -24,6 +24,238 @@ def load_module():
 
 
 class StockWaveOrchestratorTest(unittest.TestCase):
+    def test_prepare_agent_rerank_task_writes_chunk_files_and_summary(self):
+        module = load_module()
+        stock_df = pd.DataFrame(
+            [
+                {"trade_date": "2025-08-08", "open_qfq": 10.0, "high_qfq": 10.1, "low_qfq": 9.9, "close_qfq": 10.0},
+                {"trade_date": "2025-08-11", "open_qfq": 10.0, "high_qfq": 10.6, "low_qfq": 9.9, "close_qfq": 10.5},
+                {"trade_date": "2025-08-12", "open_qfq": 10.5, "high_qfq": 11.2, "low_qfq": 10.4, "close_qfq": 11.0},
+                {"trade_date": "2025-08-13", "open_qfq": 11.0, "high_qfq": 11.8, "low_qfq": 10.9, "close_qfq": 11.6},
+            ]
+        )
+        stock_bundle = {
+            "raw_stock_daily_qfq": stock_df,
+            "raw_daily_basic": pd.DataFrame(),
+            "raw_moneyflow": pd.DataFrame(),
+            "raw_limit_list_d": pd.DataFrame(),
+        }
+        news_rows = []
+        for index in range(105):
+            news_rows.append(
+                {
+                    "published_at": f"2025-08-12 {9 + index // 60:02d}:{index % 60:02d}",
+                    "source_id": "zsxq_damao" if index % 2 == 0 else "zsxq_saidao_touyan",
+                    "title": f"存储候选标题 {index:03d}",
+                    "raw_text": f"这是第 {index:03d} 条存储候选原文。",
+                    "url": f"https://example.com/{index}",
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = module.prepare_agent_rerank_task(
+                case_context={
+                    "stock_name": "佰维存储",
+                    "ts_code": "688525.SH",
+                    "start_date": "2025-01-01",
+                    "end_date": "2026-04-07",
+                    "sample_label": "存储芯片",
+                },
+                stock_bundle=stock_bundle,
+                news_evidence=news_rows,
+                concept_frames={},
+                concept_labels={},
+                rerank_root=Path(tmpdir),
+                task_id="attr-rerank",
+                segmenter=lambda df: [
+                    {
+                        "start_date": "2025-08-11",
+                        "peak_date": "2025-08-13",
+                        "start_price": 10.0,
+                        "peak_price": 11.6,
+                        "wave_gain_pct": 16.0,
+                        "bars": 3,
+                    }
+                ],
+            )
+
+            summary_path = Path(result["summary_path"])
+            self.assertTrue(summary_path.exists())
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(summary["task_id"], "attr-rerank")
+            self.assertEqual(summary["wave_count"], 1)
+            self.assertEqual(summary["waves"][0]["dedup_title_count"], 105)
+            self.assertEqual(summary["waves"][0]["chunk_count"], 2)
+
+            wave_dir = Path(result["wave_dirs"]["W1"])
+            self.assertTrue((wave_dir / "candidates.jsonl").exists())
+            self.assertTrue((wave_dir / "rough_chunks" / "chunk_001.md").exists())
+            self.assertTrue((wave_dir / "rough_chunks" / "chunk_002.md").exists())
+            chunk_001 = (wave_dir / "rough_chunks" / "chunk_001.md").read_text(encoding="utf-8")
+            chunk_002 = (wave_dir / "rough_chunks" / "chunk_002.md").read_text(encoding="utf-8")
+            self.assertIn("每个 chunk 直接选 3-5 条", chunk_001)
+            self.assertIn("I00001", chunk_001)
+            self.assertIn("I00101", chunk_002)
+
+    def test_finalize_agent_rerank_task_uses_selected_ids_instead_of_local_rule_ranking(self):
+        module = load_module()
+        stock_df = pd.DataFrame(
+            [
+                {"trade_date": "2025-08-11", "open_qfq": 10.0, "high_qfq": 10.6, "low_qfq": 9.9, "close_qfq": 10.5},
+                {"trade_date": "2025-08-12", "open_qfq": 10.5, "high_qfq": 11.2, "low_qfq": 10.4, "close_qfq": 11.0},
+                {"trade_date": "2025-08-13", "open_qfq": 11.0, "high_qfq": 11.8, "low_qfq": 10.9, "close_qfq": 11.6},
+            ]
+        )
+        stock_bundle = {
+            "raw_stock_daily_qfq": stock_df,
+            "raw_daily_basic": pd.DataFrame([{"trade_date": "2025-08-11", "turnover_rate": 5.1}]),
+            "raw_moneyflow": pd.DataFrame([{"trade_date": "2025-08-13", "net_mf_amount": 3200.0}]),
+            "raw_limit_list_d": pd.DataFrame([{"trade_date": "2025-08-13", "limit_status": "U", "open_times": 0}]),
+        }
+        news_rows = [
+            {
+                "published_at": "2025-08-01 09:00",
+                "source_id": "zsxq_damao",
+                "title": "被最终选中的存储证据",
+                "raw_text": "这是被最终选中的原文。",
+                "url": "https://example.com/selected",
+            },
+            {
+                "published_at": "2025-08-02 09:00",
+                "source_id": "zsxq_saidao_touyan",
+                "title": "本地规则更偏爱的另一条证据",
+                "raw_text": "这条不应该出现在最终报告里。",
+                "url": "https://example.com/other",
+            },
+        ]
+        concept_frames = {
+            "886069.TI": pd.DataFrame(
+                [
+                    {"trade_date": "2025-08-11", "close": 100.0},
+                    {"trade_date": "2025-08-12", "close": 103.0},
+                    {"trade_date": "2025-08-13", "close": 107.0},
+                ]
+            )
+        }
+        concept_labels = {"886069.TI": {"code": "886069.TI", "name": "存储芯片"}}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rerank_root = Path(tmpdir)
+            prepared = module.prepare_agent_rerank_task(
+                case_context={
+                    "stock_name": "佰维存储",
+                    "ts_code": "688525.SH",
+                    "start_date": "2025-01-01",
+                    "end_date": "2026-04-07",
+                    "sample_label": "存储芯片",
+                },
+                stock_bundle=stock_bundle,
+                news_evidence=news_rows,
+                concept_frames=concept_frames,
+                concept_labels=concept_labels,
+                rerank_root=rerank_root,
+                task_id="attr-rerank",
+                segmenter=lambda df: [
+                    {
+                        "start_date": "2025-08-11",
+                        "peak_date": "2025-08-13",
+                        "start_price": 10.0,
+                        "peak_price": 11.6,
+                        "wave_gain_pct": 16.0,
+                        "bars": 3,
+                    }
+                ],
+            )
+            selection_path = rerank_root / "final_selection.json"
+            selection_path.write_text(
+                json.dumps(
+                    {
+                        "one_liner": "存储涨价与 AI 存储升级共振。",
+                        "waves": [
+                            {
+                                "wave_id": "W1",
+                                "one_line_logic": "存储涨价与 AI 存储升级共振。",
+                                "final_picks": [
+                                    {
+                                        "item_id": "I00001",
+                                        "role": "启动前强信号",
+                                        "reason": "直接由 agent 入围。",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_plotter(df, waves, output_path, title, style="enhanced"):
+                output = Path(output_path)
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"fake-png")
+                return {"output_path": str(output), "candles_plotted": len(df), "waves_annotated": len(waves), "style": style}
+
+            result = module.finalize_agent_rerank_task(
+                case_context={
+                    "stock_name": "佰维存储",
+                    "ts_code": "688525.SH",
+                    "start_date": "2025-01-01",
+                    "end_date": "2026-04-07",
+                    "sample_label": "存储芯片",
+                },
+                stock_bundle=stock_bundle,
+                news_evidence=news_rows,
+                concept_frames=concept_frames,
+                concept_labels=concept_labels,
+                rerank_root=rerank_root,
+                selection_path=selection_path,
+                output_root=rerank_root,
+                segmenter=lambda df: [
+                    {
+                        "start_date": "2025-08-11",
+                        "peak_date": "2025-08-13",
+                        "start_price": 10.0,
+                        "peak_price": 11.6,
+                        "wave_gain_pct": 16.0,
+                        "bars": 3,
+                    }
+                ],
+                plotter=fake_plotter,
+            )
+
+            markdown = Path(result["report_path"]).read_text(encoding="utf-8")
+            self.assertIn("被最终选中的存储证据", markdown)
+            self.assertNotIn("本地规则更偏爱的另一条证据", markdown)
+            self.assertIn("- 波段审查：`agent_rerank`", markdown)
+            self.assertIn("- 一句话逻辑：`存储涨价与 AI 存储升级共振。`", markdown)
+
+    def test_render_news_raw_blocks_orders_by_published_at_ascending(self):
+        module = load_module()
+
+        markdown = module._render_news_raw_blocks(
+            [
+                {
+                    "published_at": "2025-12-30 14:08:42",
+                    "source_id": "zsxq_zhuwang",
+                    "title": "后面的证据",
+                    "raw_text": "后面的原文",
+                    "url": "https://example.com/later",
+                },
+                {
+                    "published_at": "2025-11-05 19:37:22",
+                    "source_id": "zsxq_damao",
+                    "title": "更早的证据",
+                    "raw_text": "更早的原文",
+                    "url": "https://example.com/earlier",
+                },
+            ]
+        )
+
+        self.assertLess(markdown.index("更早的证据"), markdown.index("后面的证据"))
+        self.assertLess(markdown.index("2025-11-05 19:37"), markdown.index("2025-12-30 14:08"))
+
     def test_build_timeline_rows_uses_brief_impact_summary_instead_of_full_raw_text(self):
         module = load_module()
 
@@ -45,7 +277,7 @@ class StockWaveOrchestratorTest(unittest.TestCase):
         self.assertEqual(rows[0]["impact"], "第一段影响说明。")
         self.assertNotIn("第二段很长的补充细节", rows[0]["impact"])
 
-    def test_select_news_evidence_prefers_wave_start_proximity_and_deduplicates(self):
+    def test_select_news_evidence_ignores_wscn_live_and_deduplicates(self):
         module = load_module()
 
         selected = module._select_news_evidence(
@@ -84,10 +316,9 @@ class StockWaveOrchestratorTest(unittest.TestCase):
             top_k=2,
         )
 
-        self.assertEqual(len(selected), 2)
+        self.assertEqual(len(selected), 1)
         self.assertEqual(selected[0]["title"], "五洲新春切入机器人丝杠")
         self.assertEqual(selected[0]["source_id"], "zsxq_saidao_touyan")
-        self.assertEqual(selected[1]["title"], "机器人板块回暖")
 
     def test_select_news_evidence_accepts_tz_aware_published_at(self):
         module = load_module()
@@ -116,6 +347,41 @@ class StockWaveOrchestratorTest(unittest.TestCase):
 
         self.assertEqual(len(selected), 1)
         self.assertEqual(selected[0]["title"], "五洲新春切入机器人丝杠")
+
+    def test_select_news_evidence_excludes_news_after_wave_peak(self):
+        module = load_module()
+
+        selected = module._select_news_evidence(
+            news_evidence=[
+                {
+                    "published_at": "2025-11-27 08:00",
+                    "source_id": "zsxq_saidao_touyan",
+                    "title": "波段启动催化",
+                    "raw_text": "发生在波段启动前。",
+                    "url": "https://example.com/1",
+                },
+                {
+                    "published_at": "2026-02-01 08:00",
+                    "source_id": "zsxq_damao",
+                    "title": "波段结束后的点评",
+                    "raw_text": "发布时间晚于波段峰值，不应进入该波段分析。",
+                    "url": "https://example.com/2",
+                },
+            ],
+            stock_name="五洲新春",
+            sample_label="机器人概念",
+            concept_labels={"886069.TI": {"name": "人形机器人", "code": "886069.TI"}},
+            waves=[
+                {
+                    "start_date": "2025-11-28",
+                    "peak_date": "2025-12-20",
+                }
+            ],
+            top_k=5,
+        )
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["title"], "波段启动催化")
 
     def test_run_stock_wave_attribution_only_keeps_selected_news_rows(self):
         module = load_module()
@@ -203,9 +469,10 @@ class StockWaveOrchestratorTest(unittest.TestCase):
             )
 
             markdown = Path(result["report_path"]).read_text(encoding="utf-8")
-            self.assertEqual(markdown.count("#### 证据 "), 2)
-            self.assertEqual(markdown.count("五洲新春切入机器人丝杠"), 3)
-            self.assertIn("机器人板块回暖", markdown)
+            self.assertEqual(markdown.count("#### 证据 "), 1)
+            self.assertEqual(markdown.count("五洲新春切入机器人丝杠"), 1)
+            self.assertIn("- 粗排新闻来源分布：`zsxq_damao(1条) / zsxq_saidao_touyan(1条)`", markdown)
+            self.assertNotIn("机器人板块回暖", markdown)
             self.assertNotIn("https://example.com/dup", markdown)
 
     def test_build_wave_attribution_search_prompt_uses_standardized_fields_and_order(self):
@@ -277,47 +544,91 @@ class StockWaveOrchestratorTest(unittest.TestCase):
                 "ts_code": "603667.SH",
                 "start_date": "2025-11-05",
                 "end_date": "2026-01-22",
+                "report_time": "2026-04-06 19:00:00+08:00",
                 "plot_relpath": "../../data/plots/603667_SH_wave_candles.png",
-                "timeline_rows": [
-                    {"time": "2025-11-05 19:37", "category": "主题催化", "event": "小鹏科技日", "impact": "打开机器人主题预期", "source": "zsxq_zhuwang"}
-                ],
-                "wave_rows": [
-                    {"wave_id": "W1", "period": "2025-11-28 -> 2026-01-22", "gain_pct": "102.25%", "review": "up_valid", "main_cause": "机器人跨年主线", "alt_cause": "小鹏科技日"}
-                ],
-                "news_rows": [
-                    {"published_at": "2025-12-30 14:08", "source_id": "zsxq_zhuwang", "title": "机器人板块回血", "raw_text": "开启跨年主线行情", "url": "https://example.com/news"}
-                ],
-                "quant_rows": [
-                    {"metric": "区间涨幅", "value": "105.08%", "evidence": "close_qfq 44.91 -> 90.83", "interpretation": "显著强于大盘"}
-                ],
-                "concept_rows": [
-                    {"concept_name": "人形机器人", "concept_code": "886069.TI", "period_return_pct": "11.53%", "close_corr": "0.9439", "ret_corr": "0.4718", "interpretation": "同步性最高"}
-                ],
                 "one_line_logic": "机器人T链主线驱动，小鹏科技日点火，跨年情绪强化。",
-                "final_verdict": {
-                    "main_cause": "机器人T链 / 丝杠平台化",
-                    "alt_cause": "机器人板块跨年情绪强化",
-                    "final_judgment": "这轮主升更偏向机器人T链主线，不是泛机器人概念跟涨。",
-                    "notes": "启动与加速阶段均有本地证据支撑。",
-                    "confidence": "中高",
-                },
-                "conclusion_rows": [
-                    {"dimension": "主因", "value": "机器人主线 + 跨年情绪", "confidence": "中高", "notes": "与案例颗粒度对齐"}
+                "wave_sections": [
+                    {
+                        "wave_id": "W1",
+                        "period": "2025-11-28 -> 2026-01-22",
+                        "gain_pct": "102.25%",
+                        "review": "up_valid",
+                        "one_line_logic": "机器人T链主线驱动，小鹏科技日点火，跨年情绪强化。",
+                        "timeline_rows": [
+                            {
+                                "time": "2025-11-05 19:37",
+                                "category": "主题催化",
+                                "event": "小鹏科技日",
+                                "impact": "打开机器人主题预期",
+                                "source": "zsxq_zhuwang",
+                            }
+                        ],
+                        "news_rows": [
+                            {
+                                "published_at": "2025-12-30 14:08:42",
+                                "source_id": "zsxq_zhuwang",
+                                "title": "机器人板块回血",
+                                "raw_text": "开启跨年主线行情",
+                                "url": "https://example.com/news",
+                            }
+                        ],
+                        "quant_rows": [
+                            {
+                                "metric": "区间涨幅",
+                                "value": "105.08%",
+                                "evidence": "close_qfq 44.91 -> 90.83",
+                                "interpretation": "显著强于大盘",
+                            }
+                        ],
+                        "concept_rows": [
+                            {
+                                "concept_name": "人形机器人",
+                                "concept_code": "886069.TI",
+                                "period_return_pct": "11.53%",
+                                "close_corr": "0.9439",
+                                "ret_corr": "0.4718",
+                                "interpretation": "同步性最高",
+                            }
+                        ],
+                        "conclusion_rows": [
+                            {
+                                "dimension": "主因",
+                                "value": "机器人主线 + 跨年情绪",
+                                "confidence": "中高",
+                                "notes": "与案例颗粒度对齐",
+                            }
+                        ],
+                        "final_verdict": {
+                            "main_cause": "机器人T链 / 丝杠平台化",
+                            "alt_cause": "机器人板块跨年情绪强化",
+                            "final_judgment": "这轮主升更偏向机器人T链主线，不是泛机器人概念跟涨。",
+                            "notes": "启动与加速阶段均有本地证据支撑。",
+                            "confidence": "中高",
+                        },
+                    }
                 ],
             }
         )
 
-        self.assertIn("## 事件时间线表", markdown)
-        self.assertIn("## 波段分段归因表", markdown)
-        self.assertIn("## 本地 news 证据表", markdown)
+        self.assertIn("- 报告时间：`2026-04-06 19:00:00+08:00`", markdown)
+        self.assertIn("# 波段 W1", markdown)
+        self.assertIn("## 证据原文", markdown)
         self.assertIn("## 量价验证表", markdown)
         self.assertIn("## 概念联动验证表", markdown)
         self.assertIn("## 结论与置信度表", markdown)
+        self.assertNotIn("## 事件时间线表", markdown)
+        self.assertNotIn("## 波段分段归因表", markdown)
+        self.assertNotIn("## 本地news归因", markdown)
         self.assertIn("- 一句话逻辑：`机器人T链主线驱动，小鹏科技日点火，跨年情绪强化。`", markdown)
-        self.assertIn("| 时间 | 事件类别 | 事件 | 对波段影响 | 来源 |", markdown)
-        self.assertIn("| 波段 | 区间 | 涨幅 | 波段审查 | 主因 | 备选 |", markdown)
-        self.assertIn("| 序号 | 时间 | 来源 | 标题 | 链接 |", markdown)
-        self.assertIn("### 证据原文", markdown)
+        self.assertIn("- 区间：`2025-11-28 -> 2026-01-22`", markdown)
+        self.assertIn("- 涨幅：`102.25%`", markdown)
+        self.assertIn("- 波段审查：`up_valid`", markdown)
+        self.assertIn("- 粗排新闻来源分布：`zsxq_zhuwang(1条)`", markdown)
+        self.assertNotIn("| 时间 | 事件 | 来源 |", markdown)
+        self.assertNotIn("| 时间 | 事件类别 | 事件 | 对波段影响 | 来源 |", markdown)
+        self.assertNotIn("| 序号 | 时间 | 来源 | 标题 | 链接 |", markdown)
+        self.assertIn("2025-12-30 14:08", markdown)
+        self.assertNotIn("2025-12-30 14:08:42", markdown)
         self.assertIn("#### 证据 1", markdown)
         self.assertIn("```text", markdown)
         self.assertIn("开启跨年主线行情", markdown)
@@ -426,12 +737,17 @@ class StockWaveOrchestratorTest(unittest.TestCase):
             report_path = Path(result["report_path"])
             self.assertTrue(report_path.exists())
             markdown = report_path.read_text(encoding="utf-8")
-            self.assertIn("## 事件时间线表", markdown)
+            self.assertIn("- 报告时间：`", markdown)
+            self.assertIn("# 波段 W1", markdown)
+            self.assertIn("## 证据原文", markdown)
             self.assertIn("## 结论与置信度表", markdown)
             self.assertIn("## 综合裁决", markdown)
+            self.assertNotIn("## 事件时间线表", markdown)
+            self.assertNotIn("## 本地news归因", markdown)
             self.assertIn("- 一句话逻辑：`", markdown)
-            self.assertIn("| 序号 | 时间 | 来源 | 标题 | 链接 |", markdown)
-            self.assertIn("### 证据原文", markdown)
+            self.assertIn("- 粗排新闻来源分布：`zsxq_zhuwang(1条)`", markdown)
+            self.assertNotIn("| 时间 | 事件 | 来源 |", markdown)
+            self.assertNotIn("| 序号 | 时间 | 来源 | 标题 | 链接 |", markdown)
             self.assertIn("#### 证据 1", markdown)
             self.assertIn("```text", markdown)
             self.assertEqual(chatgpt_calls, [])
@@ -442,6 +758,157 @@ class StockWaveOrchestratorTest(unittest.TestCase):
             self.assertNotIn("skills/chatgpt-plus-browser/scripts/chatgpt_cdp.mjs", result["call_chain"])
             self.assertTrue(Path(result["plot_path"]).exists())
             self.assertTrue(Path(result["report_contract_path"]).exists())
+
+    def test_run_stock_wave_attribution_only_analyzes_top_2_gain_waves(self):
+        module = load_module()
+        stock_df = pd.DataFrame(
+            [
+                {"trade_date": "2025-12-01", "open_qfq": 10.0, "high_qfq": 10.3, "low_qfq": 9.9, "close_qfq": 10.0},
+                {"trade_date": "2025-12-02", "open_qfq": 10.0, "high_qfq": 11.0, "low_qfq": 9.9, "close_qfq": 10.8},
+                {"trade_date": "2025-12-03", "open_qfq": 10.8, "high_qfq": 11.1, "low_qfq": 10.6, "close_qfq": 11.0},
+                {"trade_date": "2025-12-04", "open_qfq": 11.0, "high_qfq": 12.0, "low_qfq": 10.9, "close_qfq": 11.8},
+                {"trade_date": "2025-12-05", "open_qfq": 11.8, "high_qfq": 12.5, "low_qfq": 11.6, "close_qfq": 12.2},
+                {"trade_date": "2025-12-08", "open_qfq": 12.2, "high_qfq": 13.5, "low_qfq": 12.1, "close_qfq": 13.2},
+                {"trade_date": "2025-12-09", "open_qfq": 13.2, "high_qfq": 15.0, "low_qfq": 13.0, "close_qfq": 14.6},
+                {"trade_date": "2025-12-10", "open_qfq": 14.6, "high_qfq": 15.5, "low_qfq": 14.4, "close_qfq": 15.2},
+            ]
+        )
+        stock_bundle = {
+            "raw_stock_daily_qfq": stock_df,
+            "raw_daily_basic": pd.DataFrame(
+                [{"trade_date": row["trade_date"], "turnover_rate": 5.0 + index} for index, row in enumerate(stock_df.to_dict("records"))]
+            ),
+            "raw_moneyflow": pd.DataFrame(
+                [{"trade_date": row["trade_date"], "net_mf_amount": 1000.0 + index * 100.0} for index, row in enumerate(stock_df.to_dict("records"))]
+            ),
+            "raw_limit_list_d": pd.DataFrame([{"trade_date": "2025-12-10", "limit_status": "U", "open_times": 0}]),
+        }
+        news_rows = [
+            {
+                "published_at": "2025-12-01 09:00",
+                "source_id": "zsxq_zhuwang",
+                "title": "第一波催化",
+                "raw_text": "对应低涨幅波段。",
+                "url": "https://example.com/w1",
+            },
+            {
+                "published_at": "2025-12-04 09:00",
+                "source_id": "zsxq_zhuwang",
+                "title": "第二波催化",
+                "raw_text": "对应中等涨幅波段。",
+                "url": "https://example.com/w2",
+            },
+            {
+                "published_at": "2025-12-08 09:00",
+                "source_id": "zsxq_zhuwang",
+                "title": "第三波催化",
+                "raw_text": "对应最高涨幅波段。",
+                "url": "https://example.com/w3",
+            },
+            {
+                "published_at": "2025-12-09 09:00",
+                "source_id": "zsxq_zhuwang",
+                "title": "第四波催化",
+                "raw_text": "对应次高涨幅波段。",
+                "url": "https://example.com/w4",
+            },
+        ]
+        concept_frames = {
+            "886069.TI": pd.DataFrame(
+                [
+                    {"trade_date": "2025-12-01", "close": 100.0},
+                    {"trade_date": "2025-12-02", "close": 102.0},
+                    {"trade_date": "2025-12-03", "close": 103.0},
+                    {"trade_date": "2025-12-04", "close": 106.0},
+                    {"trade_date": "2025-12-05", "close": 108.0},
+                    {"trade_date": "2025-12-08", "close": 111.0},
+                    {"trade_date": "2025-12-09", "close": 116.0},
+                    {"trade_date": "2025-12-10", "close": 118.0},
+                ]
+            )
+        }
+        concept_labels = {"886069.TI": {"code": "886069.TI", "name": "人形机器人"}}
+        plot_calls = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir)
+
+            def fake_plotter(df, waves, output_path, title, style="enhanced"):
+                plot_calls.append(list(waves))
+                output = Path(output_path)
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"fake-png")
+                return {"output_path": str(output), "candles_plotted": len(df), "waves_annotated": len(waves), "style": style}
+
+            result = module.run_stock_wave_attribution(
+                case_context={
+                    "stock_name": "示例股票",
+                    "ts_code": "000001.SZ",
+                    "start_date": "2025-12-01",
+                    "end_date": "2025-12-10",
+                    "sample_label": "机器人概念",
+                },
+                stock_bundle=stock_bundle,
+                news_evidence=news_rows,
+                concept_frames=concept_frames,
+                concept_labels=concept_labels,
+                output_root=output_root,
+                segmenter=lambda df: [
+                    {
+                        "start_date": "2025-12-01",
+                        "peak_date": "2025-12-02",
+                        "start_price": 10.0,
+                        "peak_price": 10.8,
+                        "wave_gain_pct": 8.0,
+                        "bars": 2,
+                    },
+                    {
+                        "start_date": "2025-12-03",
+                        "peak_date": "2025-12-04",
+                        "start_price": 11.0,
+                        "peak_price": 11.8,
+                        "wave_gain_pct": 7.27,
+                        "bars": 2,
+                    },
+                    {
+                        "start_date": "2025-12-04",
+                        "peak_date": "2025-12-08",
+                        "start_price": 11.8,
+                        "peak_price": 13.2,
+                        "wave_gain_pct": 11.86,
+                        "bars": 3,
+                    },
+                    {
+                        "start_date": "2025-12-08",
+                        "peak_date": "2025-12-10",
+                        "start_price": 13.2,
+                        "peak_price": 15.2,
+                        "wave_gain_pct": 15.15,
+                        "bars": 3,
+                    },
+                ],
+                plotter=fake_plotter,
+            )
+
+            self.assertEqual(result["wave_count"], 2)
+            self.assertEqual(len(plot_calls), 1)
+            self.assertEqual(len(plot_calls[0]), 2)
+            self.assertEqual(
+                [wave["wave_gain_pct"] for wave in plot_calls[0]],
+                [15.15, 11.86],
+            )
+            self.assertEqual(
+                [wave["wave_id"] for wave in plot_calls[0]],
+                ["W1", "W2"],
+            )
+            markdown = Path(result["report_path"]).read_text(encoding="utf-8")
+            self.assertEqual(markdown.count("# 波段 W"), 2)
+            self.assertNotIn("2025-12-03 -> 2025-12-04", markdown)
+            self.assertIn("# 波段 W1\n\n- 区间：`2025-12-08 -> 2025-12-10`", markdown)
+            self.assertIn("# 波段 W2\n\n- 区间：`2025-12-04 -> 2025-12-08`", markdown)
+            self.assertIn("2025-12-04 -> 2025-12-08", markdown)
+            self.assertIn("2025-12-08 -> 2025-12-10", markdown)
+            self.assertNotIn("2025-12-01 -> 2025-12-02", markdown)
 
     def test_orchestrator_can_still_enable_chatgpt_flow_explicitly(self):
         module = load_module()
@@ -554,12 +1021,12 @@ class StockWaveOrchestratorTest(unittest.TestCase):
                 "raw_stock_daily_qfq": pd.DataFrame(
                     [
                         {"trade_date": "2025-11-05", "open_qfq": 10.0, "high_qfq": 10.5, "low_qfq": 9.8, "close_qfq": 10.0},
-                        {"trade_date": "2025-11-06", "open_qfq": 10.1, "high_qfq": 10.8, "low_qfq": 10.0, "close_qfq": 10.6},
+                        {"trade_date": "2026-01-21", "open_qfq": 10.1, "high_qfq": 10.8, "low_qfq": 10.0, "close_qfq": 10.6},
                     ]
                 ),
                 "raw_daily_basic": pd.DataFrame([{"trade_date": "2025-11-05", "turnover_rate": 5.0}]),
-                "raw_moneyflow": pd.DataFrame([{"trade_date": "2025-11-06", "net_mf_amount": 1200.0}]),
-                "raw_limit_list_d": pd.DataFrame([{"trade_date": "2025-11-06", "limit_status": "U"}]),
+                "raw_moneyflow": pd.DataFrame([{"trade_date": "2026-01-21", "net_mf_amount": 1200.0}]),
+                "raw_limit_list_d": pd.DataFrame([{"trade_date": "2026-01-21", "limit_status": "U"}]),
             }
 
         def fake_concept_fetcher(conn, ts_code, start_date, end_date):
@@ -569,7 +1036,7 @@ class StockWaveOrchestratorTest(unittest.TestCase):
                     "886069.TI": pd.DataFrame(
                         [
                             {"trade_date": "2025-11-05", "close": 100.0},
-                            {"trade_date": "2025-11-06", "close": 103.0},
+                            {"trade_date": "2026-01-21", "close": 103.0},
                         ]
                     )
                 },
@@ -653,6 +1120,398 @@ class StockWaveOrchestratorTest(unittest.TestCase):
         self.assertIn("人形机器人", calls["keywords"])
         self.assertTrue(str(calls["analysis_dir"]).endswith("/docs/analysis"))
         self.assertTrue(str(calls["plot_dir"]).endswith("/data/plots"))
+        self.assertEqual(result["report_path"], "/tmp/fake-report.md")
+
+    def test_run_local_attribution_task_rejects_truncated_stock_window(self):
+        module = load_module()
+
+        class _DummyConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        def fake_connect(_dsn):
+            return _DummyConnection()
+
+        def fake_stock_bundle_fetcher(conn, ts_code, start_date, end_date):
+            self.assertIsInstance(conn, _DummyConnection)
+            return {
+                "raw_stock_daily_qfq": pd.DataFrame(
+                    [
+                        {"trade_date": "2025-09-10", "open_qfq": 87.0, "high_qfq": 88.0, "low_qfq": 86.0, "close_qfq": 87.61},
+                        {"trade_date": "2026-03-09", "open_qfq": 208.0, "high_qfq": 214.0, "low_qfq": 205.0, "close_qfq": 211.91},
+                    ]
+                ),
+                "raw_daily_basic": pd.DataFrame([{"trade_date": "2025-09-10", "turnover_rate": 1.0}]),
+                "raw_moneyflow": pd.DataFrame([{"trade_date": "2026-03-09", "net_mf_amount": 1.0}]),
+                "raw_limit_list_d": pd.DataFrame([{"trade_date": "2026-01-28", "limit_status": "U"}]),
+            }
+
+        def fake_concept_fetcher(conn, ts_code, start_date, end_date):
+            return {}, {}
+
+        def fake_news_fetcher(conn, start_date, end_date, keywords):
+            return []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "stock-wave-attribution.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "postgres:",
+                        "  event_news_dsn: postgresql://tester@localhost:5432/event_news",
+                        "  event_quant_dsn: postgresql://tester@localhost:5432/event_quant",
+                        "tushare:",
+                        "  token: dummy-token",
+                        "  http_url: http://example.com",
+                        "paths:",
+                        f"  analysis_dir: {tmpdir}/docs/analysis",
+                        f"  plot_dir: {tmpdir}/data/plots",
+                        f"  cache_dir: {tmpdir}/data/stock_cache",
+                        "chatgpt:",
+                        "  enabled: false",
+                        "  node_bin: node",
+                        "  script_path: ../chatgpt-plus-browser/scripts/chatgpt_cdp.mjs",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "量价数据窗口被截断"):
+                module.run_local_attribution_task(
+                    stock_name="长飞光纤",
+                    ts_code="601869.SH",
+                    start_date="2025-01-01",
+                    end_date="2026-04-02",
+                    sample_label="光纤概念",
+                    config_path=config_path,
+                    db_connect=fake_connect,
+                    stock_bundle_fetcher=fake_stock_bundle_fetcher,
+                    concept_fetcher=fake_concept_fetcher,
+                    news_fetcher=fake_news_fetcher,
+                    akshare_stock_bundle_fetcher=None,
+                    quant_bundle_persister=None,
+                    tushare_concept_bundle_fetcher=None,
+                    concept_bundle_persister=None,
+                )
+
+    def test_run_local_attribution_task_backfills_truncated_window_from_akshare_then_refetches_db(self):
+        module = load_module()
+        calls = {
+            "stock_bundle_fetch": 0,
+            "akshare_fetch": [],
+            "persist": [],
+        }
+
+        class _DummyConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        def fake_connect(_dsn):
+            return _DummyConnection()
+
+        truncated_bundle = {
+            "raw_stock_daily_qfq": pd.DataFrame(
+                [
+                    {"trade_date": "2025-09-10", "open_qfq": 87.0, "high_qfq": 88.0, "low_qfq": 86.0, "close_qfq": 87.61},
+                    {"trade_date": "2026-03-09", "open_qfq": 208.0, "high_qfq": 214.0, "low_qfq": 205.0, "close_qfq": 211.91},
+                ]
+            ),
+            "raw_daily_basic": pd.DataFrame([{"trade_date": "2025-09-10", "turnover_rate": 1.0}]),
+            "raw_moneyflow": pd.DataFrame([{"trade_date": "2026-03-09", "net_mf_amount": 1.0}]),
+            "raw_limit_list_d": pd.DataFrame([{"trade_date": "2026-01-28", "limit_status": "U"}]),
+        }
+        full_bundle = {
+            "raw_stock_daily_qfq": pd.DataFrame(
+                [
+                    {"trade_date": "2025-01-02", "open_qfq": 28.0, "high_qfq": 29.0, "low_qfq": 27.5, "close_qfq": 28.25},
+                    {"trade_date": "2026-04-07", "open_qfq": 212.0, "high_qfq": 214.0, "low_qfq": 208.0, "close_qfq": 211.91},
+                ]
+            ),
+            "raw_daily_basic": pd.DataFrame(
+                [
+                    {"trade_date": "2025-01-02", "turnover_rate": 1.6},
+                    {"trade_date": "2026-04-07", "turnover_rate": 2.1},
+                ]
+            ),
+            "raw_moneyflow": pd.DataFrame(
+                [
+                    {"trade_date": "2025-01-02", "net_mf_amount": 8888.0},
+                    {"trade_date": "2026-04-07", "net_mf_amount": 9999.0},
+                ]
+            ),
+            "raw_limit_list_d": pd.DataFrame([{"trade_date": "2026-01-28", "limit_status": "U"}]),
+        }
+
+        def fake_stock_bundle_fetcher(conn, ts_code, start_date, end_date):
+            self.assertIsInstance(conn, _DummyConnection)
+            self.assertEqual(ts_code, "688525.SH")
+            calls["stock_bundle_fetch"] += 1
+            return truncated_bundle if calls["stock_bundle_fetch"] == 1 else full_bundle
+
+        def fake_concept_fetcher(conn, ts_code, start_date, end_date):
+            return {}, {}
+
+        def fake_news_fetcher(conn, start_date, end_date, keywords):
+            return []
+
+        def fake_akshare_fetcher(ts_code, start_date, end_date):
+            calls["akshare_fetch"].append((ts_code, start_date, end_date))
+            self.assertEqual(ts_code, "688525.SH")
+            self.assertEqual(start_date, "20250101")
+            self.assertEqual(end_date, "20260407")
+            return full_bundle
+
+        def fake_quant_bundle_persister(conn, ts_code, frames):
+            self.assertIsInstance(conn, _DummyConnection)
+            calls["persist"].append((ts_code, sorted(frames.keys())))
+
+        def fake_runner(case_context, stock_bundle, news_evidence, concept_frames, concept_labels, **kwargs):
+            self.assertEqual(case_context["stock_name"], "佰维存储")
+            self.assertEqual(stock_bundle["raw_stock_daily_qfq"].iloc[0]["trade_date"], "2025-01-02")
+            self.assertEqual(stock_bundle["raw_stock_daily_qfq"].iloc[-1]["trade_date"], "2026-04-07")
+            return {
+                "report_path": "/tmp/fake-report.md",
+                "plot_path": "/tmp/fake-plot.png",
+                "report_contract_path": "/tmp/contract.md",
+                "call_chain": ["runtime/wave_segmentation.py"],
+                "wave_count": 1,
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "stock-wave-attribution.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "postgres:",
+                        "  event_news_dsn: postgresql://tester@localhost:5432/event_news",
+                        "  event_quant_dsn: postgresql://tester@localhost:5432/event_quant",
+                        "tushare:",
+                        "  token: dummy-token",
+                        "  http_url: http://example.com",
+                        "paths:",
+                        f"  analysis_dir: {tmpdir}/docs/analysis",
+                        f"  plot_dir: {tmpdir}/data/plots",
+                        f"  cache_dir: {tmpdir}/data/stock_cache",
+                        "chatgpt:",
+                        "  enabled: false",
+                        "  node_bin: node",
+                        "  script_path: ../chatgpt-plus-browser/scripts/chatgpt_cdp.mjs",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = module.run_local_attribution_task(
+                stock_name="佰维存储",
+                ts_code="688525.SH",
+                start_date="2025-01-01",
+                end_date="2026-04-07",
+                sample_label="存储芯片",
+                config_path=config_path,
+                db_connect=fake_connect,
+                stock_bundle_fetcher=fake_stock_bundle_fetcher,
+                concept_fetcher=fake_concept_fetcher,
+                news_fetcher=fake_news_fetcher,
+                akshare_stock_bundle_fetcher=fake_akshare_fetcher,
+                quant_bundle_persister=fake_quant_bundle_persister,
+                tushare_concept_bundle_fetcher=None,
+                concept_bundle_persister=None,
+                attribution_runner=fake_runner,
+            )
+
+        self.assertEqual(calls["stock_bundle_fetch"], 2)
+        self.assertEqual(calls["akshare_fetch"], [("688525.SH", "20250101", "20260407")])
+        self.assertEqual(
+            calls["persist"],
+            [
+                (
+                    "688525.SH",
+                    ["raw_daily_basic", "raw_limit_list_d", "raw_moneyflow", "raw_stock_daily_qfq"],
+                )
+            ],
+        )
+        self.assertEqual(result["report_path"], "/tmp/fake-report.md")
+
+    def test_run_local_attribution_task_backfills_missing_concepts_from_tushare_proxy_then_refetches_db(self):
+        module = load_module()
+        calls = {
+            "concept_fetch": 0,
+            "tushare_concept_fetch": [],
+            "persist": [],
+            "keywords": None,
+        }
+
+        class _DummyConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        def fake_connect(_dsn):
+            return _DummyConnection()
+
+        stock_bundle = {
+            "raw_stock_daily_qfq": pd.DataFrame(
+                [
+                    {"trade_date": "2025-01-02", "open_qfq": 28.0, "high_qfq": 29.0, "low_qfq": 27.5, "close_qfq": 28.25},
+                    {"trade_date": "2026-04-07", "open_qfq": 212.0, "high_qfq": 214.0, "low_qfq": 208.0, "close_qfq": 211.91},
+                ]
+            ),
+            "raw_daily_basic": pd.DataFrame(
+                [
+                    {"trade_date": "2025-01-02", "turnover_rate": 1.6},
+                    {"trade_date": "2026-04-07", "turnover_rate": 2.1},
+                ]
+            ),
+            "raw_moneyflow": pd.DataFrame(
+                [
+                    {"trade_date": "2025-01-02", "net_mf_amount": 8888.0},
+                    {"trade_date": "2026-04-07", "net_mf_amount": 9999.0},
+                ]
+            ),
+            "raw_limit_list_d": pd.DataFrame([{"trade_date": "2026-01-28", "limit_status": "U"}]),
+        }
+        concept_frames = {
+            "BK9999": pd.DataFrame(
+                [
+                    {"trade_date": "2025-01-02", "close": 100.0},
+                    {"trade_date": "2026-04-07", "close": 132.0},
+                ]
+            )
+        }
+        concept_labels = {"BK9999": {"code": "BK9999", "name": "算力PCB"}}
+        concept_bundle = {
+            "ana_stock_concept_map": pd.DataFrame(
+                [
+                    {
+                        "ts_code": "300476.SZ",
+                        "concept_code": "BK9999",
+                        "concept_name": "算力PCB",
+                        "mapping_asof_date": "20260407",
+                        "map_source": "akshare_em_concept",
+                        "updated_at": "2026-04-07T19:00:00+08:00",
+                    }
+                ]
+            ),
+            "ana_concept_day": pd.DataFrame(
+                [
+                    {
+                        "concept_code": "BK9999",
+                        "trade_date": "2025-01-02",
+                        "concept_name": "算力PCB",
+                        "close": 100.0,
+                        "pct_change": 1.2,
+                        "vol": 10.0,
+                        "turnover_rate": 3.1,
+                    },
+                    {
+                        "concept_code": "BK9999",
+                        "trade_date": "2026-04-07",
+                        "concept_name": "算力PCB",
+                        "close": 132.0,
+                        "pct_change": 0.8,
+                        "vol": 11.0,
+                        "turnover_rate": 3.4,
+                    },
+                ]
+            ),
+        }
+
+        def fake_stock_bundle_fetcher(conn, ts_code, start_date, end_date):
+            self.assertIsInstance(conn, _DummyConnection)
+            return stock_bundle
+
+        def fake_concept_fetcher(conn, ts_code, start_date, end_date):
+            self.assertIsInstance(conn, _DummyConnection)
+            self.assertEqual(ts_code, "300476.SZ")
+            calls["concept_fetch"] += 1
+            if calls["concept_fetch"] == 1:
+                return {}, {}
+            return concept_frames, concept_labels
+
+        def fake_news_fetcher(conn, start_date, end_date, keywords):
+            calls["keywords"] = list(keywords)
+            return []
+
+        def fake_tushare_concept_fetcher(ts_code, start_date, end_date, token, http_url):
+            calls["tushare_concept_fetch"].append((ts_code, start_date, end_date, token, http_url))
+            self.assertEqual(ts_code, "300476.SZ")
+            self.assertEqual(start_date, "20250101")
+            self.assertEqual(end_date, "20260407")
+            self.assertEqual(token, "dummy-token")
+            self.assertEqual(http_url, "http://example.com")
+            return concept_bundle
+
+        def fake_concept_bundle_persister(conn, ts_code, frames):
+            self.assertIsInstance(conn, _DummyConnection)
+            calls["persist"].append((ts_code, sorted(frames.keys())))
+
+        def fake_runner(case_context, stock_bundle, news_evidence, concept_frames, concept_labels, **kwargs):
+            self.assertEqual(case_context["stock_name"], "胜宏科技")
+            self.assertEqual(sorted(concept_frames.keys()), ["BK9999"])
+            self.assertEqual(concept_labels["BK9999"]["name"], "算力PCB")
+            return {
+                "report_path": "/tmp/fake-report.md",
+                "plot_path": "/tmp/fake-plot.png",
+                "report_contract_path": "/tmp/contract.md",
+                "call_chain": ["runtime/wave_segmentation.py"],
+                "wave_count": 1,
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "stock-wave-attribution.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "postgres:",
+                        "  event_news_dsn: postgresql://tester@localhost:5432/event_news",
+                        "  event_quant_dsn: postgresql://tester@localhost:5432/event_quant",
+                        "tushare:",
+                        "  token: dummy-token",
+                        "  http_url: http://example.com",
+                        "paths:",
+                        f"  analysis_dir: {tmpdir}/docs/analysis",
+                        f"  plot_dir: {tmpdir}/data/plots",
+                        f"  cache_dir: {tmpdir}/data/stock_cache",
+                        "chatgpt:",
+                        "  enabled: false",
+                        "  node_bin: node",
+                        "  script_path: ../chatgpt-plus-browser/scripts/chatgpt_cdp.mjs",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = module.run_local_attribution_task(
+                stock_name="胜宏科技",
+                ts_code="300476.SZ",
+                start_date="2025-01-01",
+                end_date="2026-04-07",
+                sample_label="算力PCB",
+                config_path=config_path,
+                db_connect=fake_connect,
+                stock_bundle_fetcher=fake_stock_bundle_fetcher,
+                concept_fetcher=fake_concept_fetcher,
+                news_fetcher=fake_news_fetcher,
+                tushare_concept_bundle_fetcher=fake_tushare_concept_fetcher,
+                concept_bundle_persister=fake_concept_bundle_persister,
+                attribution_runner=fake_runner,
+            )
+
+        self.assertEqual(calls["concept_fetch"], 2)
+        self.assertEqual(
+            calls["tushare_concept_fetch"],
+            [("300476.SZ", "20250101", "20260407", "dummy-token", "http://example.com")],
+        )
+        self.assertEqual(calls["persist"], [("300476.SZ", ["ana_concept_day", "ana_stock_concept_map"])])
+        self.assertIn("算力PCB", calls["keywords"])
         self.assertEqual(result["report_path"], "/tmp/fake-report.md")
 
     def test_main_run_prints_json_result(self):

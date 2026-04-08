@@ -6,9 +6,10 @@
 - 已沉淀到项目脚本层的通用能力继续保留在 `scripts/`
 - skill 只负责工作流编排、外部工具接入、固定输出结构与验收约束
 
-当前先收拢两条主线：
+当前已收拢几条主线：
 
 - `chatgpt-plus-browser`
 - `stock-wave-attribution`
+- `mermaid-swimlane-diagram`
 
 这一步先建立统一目录、最小可运行入口和迁移文档，不在本轮强行复制历史实现。

@@ -114,19 +114,17 @@ def test_run_app_server_task_completes_and_records_requests_progress_and_log(tmp
     plot_dir = tmp_path / "data" / "plots"
     report_dir.mkdir(parents=True, exist_ok=True)
     plot_dir.mkdir(parents=True, exist_ok=True)
+    (plot_dir / "688375_SH_orchestrator.png").write_text("png", encoding="utf-8")
     (report_dir / "2026-03-25-688375SH-国博电子-wave-attribution.md").write_text(
         "\n".join(
             [
-                "### ChatGPT 联网归因",
-                "- task id：",
-                "  `d7b0a15f-688a-41af-b738-ec8d9ab5290a`",
-                "- 结果文件：",
-                "  `skills/chatgpt-plus-browser/.state/d7b0a15f-688a-41af-b738-ec8d9ab5290a.json`",
+                "# 国博电子波段归因",
+                "",
+                "![](../../data/plots/688375_SH_orchestrator.png)",
             ]
         ),
         encoding="utf-8",
     )
-    (plot_dir / "688375_SH_wave_candles.png").write_text("png", encoding="utf-8")
 
     process = _FakeProcess(
         [
@@ -136,16 +134,20 @@ def test_run_app_server_task_completes_and_records_requests_progress_and_log(tmp
                     "jsonrpc": "2.0",
                     "id": 2,
                     "result": {
-                        "conversationId": "conv-1",
-                        "rolloutPath": str(tmp_path / "rollout.jsonl"),
+                        "thread": {"id": "conv-1"},
                         "model": "gpt-5.4",
+                        "modelProvider": "openai",
+                        "serviceTier": None,
+                        "cwd": str(tmp_path),
+                        "approvalPolicy": "never",
+                        "approvalsReviewer": {"type": "user"},
+                        "sandbox": {"mode": "danger-full-access"},
                         "reasoningEffort": None,
                     },
                 }
             ),
             json.dumps({"jsonrpc": "2.0", "id": 3, "result": {}}),
             json.dumps({"jsonrpc": "2.0", "method": "thread/started", "params": {"thread": {"id": "conv-1"}}}),
-            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {}}),
             json.dumps(
                 {
                     "jsonrpc": "2.0",
@@ -210,8 +212,8 @@ def test_run_app_server_task_completes_and_records_requests_progress_and_log(tmp
     assert updated.status == TaskStatus.COMPLETED
     assert updated.stage == "completed"
     assert updated.report_path.endswith("2026-03-25-688375SH-国博电子-wave-attribution.md")
-    assert updated.plot_path.endswith("688375_SH_wave_candles.png")
-    assert updated.chatgpt_task_id == "d7b0a15f-688a-41af-b738-ec8d9ab5290a"
+    assert updated.plot_path.endswith("688375_SH_orchestrator.png")
+    assert updated.chatgpt_task_id == ""
     assert updated.progress_summary == "最近命令: python scripts/run.py"
     assert updated.last_event_type == "turn/completed"
     assert updated.last_command == "python scripts/run.py"
@@ -219,23 +221,26 @@ def test_run_app_server_task_completes_and_records_requests_progress_and_log(tmp
     requests = [json.loads(item) for item in process.stdin.writes]
     assert [request["method"] for request in requests] == [
         "initialize",
-        "newConversation",
-        "addConversationListener",
-        "sendUserMessage",
+        "thread/start",
+        "turn/start",
     ]
+    assert requests[0]["params"]["capabilities"] == {"experimentalApi": True}
     assert requests[1]["params"]["cwd"] == str(tmp_path)
     assert requests[1]["params"]["approvalPolicy"] == "never"
     assert requests[1]["params"]["sandbox"] == "danger-full-access"
+    assert requests[1]["params"]["experimentalRawEvents"] is True
+    assert requests[1]["params"]["persistExtendedHistory"] is True
     assert "优先直接执行给定命令" in requests[1]["params"]["developerInstructions"]
     assert "不要先全仓库探索" in requests[1]["params"]["developerInstructions"]
     assert "skills/stock-wave-attribution/scripts/orchestrator.py" in requests[1]["params"]["developerInstructions"]
     assert "结果文件都写回正式报告与任务状态" in requests[1]["params"]["baseInstructions"]
-    assert requests[3]["params"]["conversationId"] == "conv-1"
-    assert requests[3]["params"]["items"][0]["type"] == "text"
-    assert "直接在项目根目录执行下面这条命令" in requests[3]["params"]["items"][0]["data"]["text"]
-    assert "python skills/stock-wave-attribution/scripts/orchestrator.py run" in requests[3]["params"]["items"][0]["data"]["text"]
-    assert "当前默认不启用 ChatGPT 补强链路" in requests[3]["params"]["items"][0]["data"]["text"]
-    assert "正式报告必须落到 docs/analysis" in requests[3]["params"]["items"][0]["data"]["text"]
+    assert requests[2]["params"]["threadId"] == "conv-1"
+    assert requests[2]["params"]["input"][0]["type"] == "text"
+    assert "prepare-agent-rerank" in requests[2]["params"]["input"][0]["text"]
+    assert "finalize-agent-rerank" in requests[2]["params"]["input"][0]["text"]
+    assert "100 选 3-5" in requests[2]["params"]["input"][0]["text"]
+    assert "不要逐条打分" in requests[2]["params"]["input"][0]["text"]
+    assert "正式报告必须落到 docs/analysis" in requests[2]["params"]["input"][0]["text"]
     assert captured_kwargs["env"]["HTTP_PROXY"] == "http://127.0.0.1:7897"
     assert captured_kwargs["env"]["HTTPS_PROXY"] == "http://127.0.0.1:7897"
     assert captured_kwargs["env"]["ALL_PROXY"] == "http://127.0.0.1:7897"
@@ -244,7 +249,7 @@ def test_run_app_server_task_completes_and_records_requests_progress_and_log(tmp
     log_text = (tmp_path / "data" / "service_logs" / "attr-app-server-ok.log").read_text(encoding="utf-8")
     assert "[request] initialize" in log_text
     assert "[proxy_env]" in log_text
-    assert "[response] newConversation" in log_text
+    assert "[response] thread/start" in log_text
     assert "[notification] item/started" in log_text
     assert "wave plotting done" in log_text
     assert "app server stderr noise" in log_text
@@ -269,15 +274,11 @@ def test_run_app_server_task_marks_timeout_with_last_progress(tmp_path) -> None:
                     "jsonrpc": "2.0",
                     "id": 2,
                     "result": {
-                        "conversationId": "conv-timeout",
-                        "rolloutPath": str(tmp_path / "rollout-timeout.jsonl"),
-                        "model": "gpt-5.4",
-                        "reasoningEffort": None,
+                        "thread": {"id": "conv-timeout"},
                     },
                 }
             ),
             json.dumps({"jsonrpc": "2.0", "id": 3, "result": {}}),
-            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {}}),
             json.dumps(
                 {
                     "jsonrpc": "2.0",
@@ -322,6 +323,68 @@ def test_run_app_server_task_marks_timeout_with_last_progress(tmp_path) -> None:
     assert process.terminated is True
 
 
+def test_run_app_server_task_completes_on_final_agent_message_without_turn_completed(tmp_path) -> None:
+    store = TaskStore(tmp_path / "service_tasks")
+    task = AttributionTask(
+        task_id="attr-app-server-final-message",
+        stock_name="长飞光纤",
+        ts_code="601869.SH",
+        start_date="2025-01-01",
+        end_date="2026-04-06",
+        sample_label="光纤概念",
+    )
+    store.save_task(task)
+
+    report_dir = tmp_path / "docs" / "analysis"
+    plot_dir = tmp_path / "data" / "plots"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "2026-04-06-601869SH-长飞光纤-wave-attribution.md").write_text(
+        "# report\n\n![](../../data/plots/601869_SH_orchestrator.png)\n",
+        encoding="utf-8",
+    )
+    (plot_dir / "601869_SH_orchestrator.png").write_text("png", encoding="utf-8")
+
+    process = _FakeProcess(
+        [
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "0"}}),
+            json.dumps({"jsonrpc": "2.0", "id": 2, "result": {"thread": {"id": "conv-final"}}}),
+            json.dumps({"jsonrpc": "2.0", "id": 3, "result": {}}),
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "conv-final",
+                        "turnId": "turn-final",
+                        "item": {
+                            "type": "agentMessage",
+                            "id": "msg-final",
+                            "text": "归因已完成",
+                            "phase": "final_answer",
+                        },
+                    },
+                }
+            ),
+        ]
+    )
+
+    updated = run_app_server_task(
+        task,
+        store,
+        process_factory=lambda *_args, **_kwargs: process,
+        workspace_root=tmp_path,
+        timeout_seconds=5,
+        monotonic=_make_time([0.0, 0.1, 0.2, 0.3, 6.0]),
+        sleep=lambda _seconds: None,
+    )
+
+    assert updated.status == TaskStatus.COMPLETED
+    assert updated.stage == "completed"
+    assert updated.report_path.endswith("2026-04-06-601869SH-长飞光纤-wave-attribution.md")
+    assert updated.plot_path.endswith("601869_SH_orchestrator.png")
+
+
 def test_run_app_server_task_marks_failed_when_turn_failed(tmp_path) -> None:
     store = TaskStore(tmp_path / "service_tasks")
     task = AttributionTask(
@@ -341,15 +404,11 @@ def test_run_app_server_task_marks_failed_when_turn_failed(tmp_path) -> None:
                     "jsonrpc": "2.0",
                     "id": 2,
                     "result": {
-                        "conversationId": "conv-failed",
-                        "rolloutPath": str(tmp_path / "rollout-failed.jsonl"),
-                        "model": "gpt-5.4",
-                        "reasoningEffort": None,
+                        "thread": {"id": "conv-failed"},
                     },
                 }
             ),
             json.dumps({"jsonrpc": "2.0", "id": 3, "result": {}}),
-            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {}}),
             json.dumps(
                 {
                     "jsonrpc": "2.0",
@@ -401,15 +460,11 @@ def test_run_app_server_task_prefers_exec_command_begin_over_agent_delta_noise(t
                     "jsonrpc": "2.0",
                     "id": 2,
                     "result": {
-                        "conversationId": "conv-noise",
-                        "rolloutPath": str(tmp_path / "rollout-noise.jsonl"),
-                        "model": "gpt-5.4",
-                        "reasoningEffort": None,
+                        "thread": {"id": "conv-noise"},
                     },
                 }
             ),
             json.dumps({"jsonrpc": "2.0", "id": 3, "result": {}}),
-            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {}}),
             json.dumps(
                 {
                     "jsonrpc": "2.0",
@@ -475,15 +530,11 @@ def test_run_app_server_task_fails_fast_on_stream_error(tmp_path) -> None:
                     "jsonrpc": "2.0",
                     "id": 2,
                     "result": {
-                        "conversationId": "conv-stream-error",
-                        "rolloutPath": str(tmp_path / "rollout-stream-error.jsonl"),
-                        "model": "gpt-5.4",
-                        "reasoningEffort": None,
+                        "thread": {"id": "conv-stream-error"},
                     },
                 }
             ),
             json.dumps({"jsonrpc": "2.0", "id": 3, "result": {}}),
-            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {}}),
             json.dumps(
                 {
                     "jsonrpc": "2.0",

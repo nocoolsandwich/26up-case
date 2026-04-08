@@ -6,6 +6,7 @@ from scripts.attribution_data import (
     DEFAULT_EVENT_NEWS_DSN,
     DEFAULT_NEWS_SOURCES,
     DEFAULT_EVENT_QUANT_DSN,
+    DEFAULT_MAX_WINDOW_EDGE_GAP_DAYS,
     MARKET_BENCHMARKS,
     build_stock_window_bundle_queries,
     build_validation_table,
@@ -14,6 +15,7 @@ from scripts.attribution_data import (
     fetch_stock_window_bundle,
     postgres_bootstrap_commands,
     standardize_news_evidence_rows,
+    validate_stock_window_coverage,
 )
 
 
@@ -64,14 +66,13 @@ class AttributionDataTest(unittest.TestCase):
             ],
         )
 
-    def test_default_news_sources_include_core_research_and_live_feeds(self):
+    def test_default_news_sources_exclude_wscn_live(self):
         self.assertEqual(
             DEFAULT_NEWS_SOURCES,
             (
                 "zsxq_zhuwang",
                 "zsxq_damao",
                 "zsxq_saidao_touyan",
-                "wscn_live",
             ),
         )
 
@@ -136,6 +137,34 @@ class AttributionDataTest(unittest.TestCase):
 
         self.assertEqual(sorted(result.keys()), ["raw_daily_basic", "raw_limit_list_d", "raw_moneyflow", "raw_stock_daily_qfq"])
         self.assertEqual(list(result["raw_stock_daily_qfq"].columns), ["ts_code", "trade_date", "open_qfq", "high_qfq", "low_qfq", "close_qfq", "pct_chg", "vol", "amount"])
+
+    def test_validate_stock_window_coverage_accepts_small_non_trading_day_gap(self):
+        bundle = {
+            "raw_stock_daily_qfq": pd.DataFrame(
+                [
+                    {"trade_date": "2025-01-02", "close_qfq": 10.0},
+                    {"trade_date": "2026-04-01", "close_qfq": 12.0},
+                ]
+            )
+        }
+
+        validate_stock_window_coverage(bundle, "601869.SH", "2025-01-01", "2026-04-02")
+
+    def test_validate_stock_window_coverage_rejects_truncated_window(self):
+        bundle = {
+            "raw_stock_daily_qfq": pd.DataFrame(
+                [
+                    {"trade_date": "2025-09-10", "close_qfq": 87.61},
+                    {"trade_date": "2026-03-09", "close_qfq": 211.91},
+                ]
+            )
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "量价数据窗口被截断.*601869.SH.*2025-09-10.*2026-03-09",
+        ):
+            validate_stock_window_coverage(bundle, "601869.SH", "2025-01-01", "2026-04-02")
 
     def test_fetch_news_evidence_returns_standardized_rows(self):
         conn = self._FakeConnection(
