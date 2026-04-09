@@ -40,6 +40,28 @@ def test_build_codex_prompt_contains_skill_and_task_context() -> None:
     assert "ChatGPT" not in prompt
 
 
+def test_build_codex_prompt_avoids_hardcoded_storage_bias_for_non_storage_tasks() -> None:
+    task = AttributionTask(
+        task_id="attr-generic",
+        stock_name="永鼎股份",
+        ts_code="600105.SH",
+        start_date="2025-09-10",
+        end_date="2026-03-09",
+        sample_label="军工",
+    )
+
+    prompt = build_codex_prompt(task)
+
+    assert "样本标签：军工" in prompt
+    assert "优先选择与该标的和样本标签更贴近的启动前/启动期强信号" in prompt
+    assert "长鑫" not in prompt
+    assert "长江存储" not in prompt
+    assert "NAND" not in prompt
+    assert "DRAM" not in prompt
+    assert "样本标签只是入口线索，不是最终结论" in prompt
+    assert "如果公司直接催化、产业链证据或波段节奏指向更强的其他主线，应以更强主线为准" in prompt
+
+
 def test_build_agent_rerank_commands_use_direct_orchestrator_entry() -> None:
     task = AttributionTask(
         task_id="attr-003a",
