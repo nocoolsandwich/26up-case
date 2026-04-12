@@ -1,5 +1,7 @@
 import unittest
 from contextlib import contextmanager
+import threading
+import time
 from unittest import mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -96,6 +98,8 @@ class EventQuantSyncTest(unittest.TestCase):
 
         self.assertIsNone(args.db_dsn)
         self.assertIsNone(args.http_url)
+        self.assertEqual(args.requests_per_min, DEFAULT_FEATURE_REQUESTS_PER_MIN)
+        self.assertEqual(args.max_workers, 5)
 
     def test_build_argument_parser_supports_sync_all_stocks(self):
         parser = build_argument_parser()
@@ -818,6 +822,99 @@ class EventQuantSyncTest(unittest.TestCase):
         self.assertEqual(state_updates[-1]["status"], "failed")
         self.assertEqual(state_updates[-1]["last_success_cursor"], "000001.SZ|2026-03-10")
 
+    def test_run_case_stock_bundle_sync_parallel_fetches_and_persists_in_plan_order(self):
+        fetched = []
+        persisted = []
+        state_updates = []
+        concurrent = 0
+        max_seen = 0
+        lock = threading.Lock()
+
+        def fetch_stock_bundle(ts_code: str, start_date: str, end_date: str) -> dict[str, pd.DataFrame]:
+            nonlocal concurrent, max_seen
+            with lock:
+                concurrent += 1
+                max_seen = max(max_seen, concurrent)
+            fetched.append((ts_code, start_date, end_date))
+            if ts_code == "000001.SZ":
+                time.sleep(0.05)
+            else:
+                time.sleep(0.01)
+            with lock:
+                concurrent -= 1
+            payload = pd.DataFrame([{"ts_code": ts_code, "trade_date": end_date}])
+            return {
+                "raw_stock_daily_qfq": payload,
+                "raw_daily_basic": payload,
+                "raw_moneyflow": payload,
+                "raw_limit_list_d": payload,
+            }
+
+        run_case_stock_bundle_sync(
+            sync_config={
+                "job_name": "sync_case_stock_bundle",
+                "target_key": "case_stocks",
+                "start_date": "20240311",
+                "stock_codes": ["000001.SZ", "000002.SZ", "000003.SZ"],
+            },
+            last_cursor=None,
+            fetch_stock_bundle=fetch_stock_bundle,
+            persist_frames=lambda ts_code, frames: persisted.append(ts_code),
+            persist_sync_state=state_updates.append,
+            end_date="20260310",
+            max_workers=2,
+        )
+
+        self.assertCountEqual(
+            fetched,
+            [
+                ("000001.SZ", "20240311", "20260310"),
+                ("000002.SZ", "20240311", "20260310"),
+                ("000003.SZ", "20240311", "20260310"),
+            ],
+        )
+        self.assertEqual(persisted, ["000001.SZ", "000002.SZ", "000003.SZ"])
+        self.assertEqual(
+            [item["last_success_cursor"] for item in state_updates],
+            ["000001.SZ|2026-03-10", "000002.SZ|2026-03-10", "000003.SZ|2026-03-10"],
+        )
+        self.assertGreaterEqual(max_seen, 2)
+
+    def test_run_case_stock_bundle_sync_parallel_failure_keeps_latest_success_cursor(self):
+        state_updates = []
+        persisted = []
+
+        def fetch_stock_bundle(ts_code: str, start_date: str, end_date: str) -> dict[str, pd.DataFrame]:
+            if ts_code == "000002.SZ":
+                time.sleep(0.01)
+                raise RuntimeError("boom")
+            if ts_code == "000001.SZ":
+                time.sleep(0.05)
+            payload = pd.DataFrame([{"ts_code": ts_code, "trade_date": end_date}])
+            return {"raw_stock_daily_qfq": payload}
+
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            run_case_stock_bundle_sync(
+                sync_config={
+                    "job_name": "sync_case_stock_bundle",
+                    "target_key": "case_stocks",
+                    "start_date": "20240311",
+                    "stock_codes": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                },
+                last_cursor=None,
+                fetch_stock_bundle=fetch_stock_bundle,
+                persist_frames=lambda ts_code, frames: persisted.append(ts_code),
+                persist_sync_state=state_updates.append,
+                end_date="20260310",
+                max_workers=2,
+            )
+
+        self.assertEqual(persisted, ["000001.SZ"])
+        self.assertEqual(state_updates[0]["status"], "success")
+        self.assertEqual(state_updates[0]["last_success_cursor"], "000001.SZ|2026-03-10")
+        self.assertEqual(state_updates[-1]["status"], "failed")
+        self.assertEqual(state_updates[-1]["last_success_cursor"], "000001.SZ|2026-03-10")
+
     def test_run_stock_concept_bundle_sync_updates_state_with_latest_concept_cursor(self):
         persisted = []
         state_updates = []
@@ -1273,6 +1370,96 @@ class EventQuantSyncTest(unittest.TestCase):
         self.assertEqual(list(frames["ana_stock_concept_map"]["map_source"]), ["ths_member"])
         self.assertEqual(list(frames["ana_concept_day"]["concept_name"].unique()), ["算力PCB"])
         self.assertEqual(fake_pro.last_daily_args, ("886001.TI", "20250101", "20260407"))
+
+    def test_fetch_case_stock_concept_bundle_from_tushare_can_use_con_code_direct_lookup(self):
+        class FakePro:
+            def ths_index(self):
+                return pd.DataFrame(
+                    [
+                        {"ts_code": "700001.TI", "name": "算力租赁", "type": "N"},
+                        {"ts_code": "700002.TI", "name": "智算中心", "type": "N"},
+                    ]
+                )
+
+            def ths_member(self, ts_code=None, con_code=None, fields=""):
+                if con_code == "600666.SH":
+                    return pd.DataFrame(
+                        [
+                            {"ts_code": "700001.TI", "con_code": "600666.SH", "con_name": "奥瑞德"},
+                            {"ts_code": "700002.TI", "con_code": "600666.SH", "con_name": "奥瑞德"},
+                        ]
+                    )
+                if ts_code is not None:
+                    return pd.DataFrame(columns=["ts_code", "con_code", "con_name"])
+                raise AssertionError("ths_member 调用参数不符合预期")
+
+            def ths_daily(self, ts_code, start_date, end_date):
+                return pd.DataFrame(
+                    [
+                        {
+                            "ts_code": ts_code,
+                            "trade_date": "2026-02-09",
+                            "open": 100.0,
+                            "high": 103.0,
+                            "low": 99.0,
+                            "close": 101.0,
+                            "pct_change": 1.0,
+                            "vol": 10.0,
+                            "turnover_rate": 3.2,
+                        }
+                    ]
+                )
+
+        frames = fetch_case_stock_concept_bundle_from_tushare(
+            ts_code="600666.SH",
+            start_date="20260101",
+            end_date="20260409",
+            token="demo-token",
+            http_url="http://example.com",
+            pro=FakePro(),
+        )
+
+        self.assertEqual(
+            list(frames["ana_stock_concept_map"]["concept_code"]),
+            ["700001.TI", "700002.TI"],
+        )
+        self.assertEqual(
+            list(frames["ana_stock_concept_map"]["concept_name"]),
+            ["算力租赁", "智算中心"],
+        )
+        self.assertEqual(
+            sorted(frames["ana_concept_day"]["concept_name"].unique().tolist()),
+            ["智算中心", "算力租赁"],
+        )
+
+    def test_fetch_case_stock_concept_bundle_from_tushare_uses_no_proxy_context_when_creating_client(self):
+        state = {"entered": 0}
+
+        @contextmanager
+        def fake_no_proxy():
+            state["entered"] += 1
+            yield
+
+        class FakePro:
+            def ths_index(self):
+                return pd.DataFrame(columns=["ts_code", "name", "type"])
+
+            def ths_member(self, ts_code=None, con_code=None, fields=""):
+                return pd.DataFrame(columns=["ts_code", "con_code", "con_name"])
+
+        with mock.patch("scripts.event_quant_sync.requests_sessions_without_proxy", fake_no_proxy):
+            with mock.patch("scripts.event_quant_sync.create_tushare_client", return_value=FakePro()):
+                frames = fetch_case_stock_concept_bundle_from_tushare(
+                    ts_code="600666.SH",
+                    start_date="20260101",
+                    end_date="20260409",
+                    token="demo-token",
+                    http_url="http://example.com",
+                    pro=None,
+                )
+
+        self.assertEqual(state["entered"], 1)
+        self.assertTrue(frames["ana_stock_concept_map"].empty)
 
     def test_fetch_concept_daily_bundle_returns_normalized_concept_frames(self):
         sleep_calls = []

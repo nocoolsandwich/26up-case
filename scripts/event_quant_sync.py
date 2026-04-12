@@ -300,6 +300,7 @@ def run_case_stock_bundle_sync(
     overlap_days: int = 7,
     sleep_seconds: float = 0.0,
     sleeper: Callable[[float], None] | None = None,
+    max_workers: int = 1,
 ) -> None:
     sleeper = sleeper or time.sleep
     stock_codes = list(sync_config["stock_codes"])
@@ -310,23 +311,25 @@ def run_case_stock_bundle_sync(
         last_cursor=last_cursor,
         overlap_days=overlap_days,
     )
-    for ts_code, start_date in plan:
+
+    def _persist_success(ts_code: str, frames: dict[str, pd.DataFrame]) -> None:
+        nonlocal latest_success_cursor
+        persist_frames(ts_code, frames)
+        latest_success_cursor = format_state_cursor(ts_code, _normalize_cursor_date(end_date))
+        persist_sync_state(
+            {
+                "job_name": sync_config["job_name"],
+                "target_table": "raw_stock_daily_qfq",
+                "target_key": sync_config["target_key"],
+                "last_success_cursor": latest_success_cursor,
+                "last_success_at": datetime.now(),
+                "status": "success",
+                "error_message": None,
+            }
+        )
+
+    def _persist_failure(exc: Exception) -> None:
         try:
-            frames = fetch_stock_bundle(ts_code, start_date, end_date)
-            persist_frames(ts_code, frames)
-            persist_sync_state(
-                {
-                    "job_name": sync_config["job_name"],
-                    "target_table": "raw_stock_daily_qfq",
-                    "target_key": sync_config["target_key"],
-                    "last_success_cursor": format_state_cursor(ts_code, _normalize_cursor_date(end_date)),
-                    "last_success_at": datetime.now(),
-                    "status": "success",
-                    "error_message": None,
-                }
-            )
-            latest_success_cursor = format_state_cursor(ts_code, _normalize_cursor_date(end_date))
-        except Exception as exc:
             persist_sync_state(
                 {
                     "job_name": sync_config["job_name"],
@@ -338,9 +341,39 @@ def run_case_stock_bundle_sync(
                     "error_message": str(exc),
                 }
             )
+        except Exception:
             raise
-        if sleep_seconds > 0:
-            sleeper(sleep_seconds)
+
+    if max_workers <= 1:
+        for ts_code, start_date in plan:
+            try:
+                frames = fetch_stock_bundle(ts_code, start_date, end_date)
+                _persist_success(ts_code, frames)
+            except Exception as exc:
+                _persist_failure(exc)
+                raise
+            if sleep_seconds > 0:
+                sleeper(sleep_seconds)
+        return
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for offset in range(0, len(plan), max_workers):
+            batch = plan[offset : offset + max_workers]
+            futures = [
+                executor.submit(fetch_stock_bundle, ts_code, start_date, end_date)
+                for ts_code, start_date in batch
+            ]
+            try:
+                for (ts_code, _), future in zip(batch, futures):
+                    frames = future.result()
+                    _persist_success(ts_code, frames)
+                    if sleep_seconds > 0:
+                        sleeper(sleep_seconds)
+            except Exception as exc:
+                for future in futures:
+                    future.cancel()
+                _persist_failure(exc)
+                raise
 
 
 def run_stock_concept_bundle_sync(
@@ -507,6 +540,13 @@ def create_tushare_client(token: str, http_url: str = DEFAULT_TUSHARE_HTTP_URL):
     pro = ts.pro_api(token)
     pro._DataApi__token = token
     pro._DataApi__http_url = http_url
+    original_query = pro.query
+
+    def query_without_proxy(api_name, fields="", **kwargs):
+        with requests_sessions_without_proxy():
+            return original_query(api_name, fields=fields, **kwargs)
+
+    pro.query = query_without_proxy
     return pro
 
 
@@ -941,7 +981,9 @@ def fetch_case_stock_concept_bundle_from_tushare(
     sleeper: Callable[[float], None] | None = None,
 ) -> dict[str, pd.DataFrame]:
     sleeper = sleeper or time.sleep
-    pro = pro or create_tushare_client(token=token, http_url=http_url)
+    if pro is None:
+        with requests_sessions_without_proxy():
+            pro = create_tushare_client(token=token, http_url=http_url)
     mapping_asof_date = end_date
 
     def _call(func: Callable[[], object]):
@@ -958,12 +1000,41 @@ def fetch_case_stock_concept_bundle_from_tushare(
         http_url,
     )
     index_df = _call(lambda: pro.ths_index())
-    member_frame, concept_frame = build_theme_concept_matches(
-        index_df=index_df,
-        stock_codes=[ts_code],
-        fetch_members=lambda concept_code: _call(lambda: pro.ths_member(ts_code=concept_code)),
-        mapping_asof_date=mapping_asof_date,
-    )
+    try:
+        direct_member_df = _call(
+            lambda: pro.ths_member(
+                con_code=ts_code,
+                fields="ts_code,con_code,con_name,in_date,out_date,is_new",
+            )
+        )
+    except TypeError:
+        direct_member_df = pd.DataFrame()
+    if direct_member_df is not None and not direct_member_df.empty:
+        concept_meta = (
+            index_df.rename(columns={"ts_code": "concept_code", "name": "concept_name"})[
+                ["concept_code", "concept_name"]
+            ]
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
+        direct_hits = direct_member_df[direct_member_df["ts_code"].isin(concept_meta["concept_code"])].copy()
+        member_frame = (
+            normalize_ths_member(direct_hits, mapping_asof_date)
+            if not direct_hits.empty
+            else pd.DataFrame(columns=["ts_code", "con_code", "con_name", "mapping_asof_date"])
+        )
+        concept_frame = (
+            concept_meta[concept_meta["concept_code"].isin(member_frame["ts_code"])]
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
+    else:
+        member_frame, concept_frame = build_theme_concept_matches(
+            index_df=index_df,
+            stock_codes=[ts_code],
+            fetch_members=lambda concept_code: _call(lambda: pro.ths_member(ts_code=concept_code)),
+            mapping_asof_date=mapping_asof_date,
+        )
     if member_frame.empty or concept_frame.empty:
         empty_member = pd.DataFrame(columns=["ts_code", "con_code", "con_name", "mapping_asof_date"])
         empty_concepts = pd.DataFrame(columns=["concept_code", "trade_date", "concept_name", "close", "pct_change", "vol", "turnover_rate"])
@@ -1244,10 +1315,11 @@ def sync_case_stock_bundle_to_db(
     token: str,
     db_dsn: str = DEFAULT_DB_DSN,
     http_url: str = DEFAULT_TUSHARE_HTTP_URL,
-    requests_per_min: int = 20,
+    requests_per_min: int = DEFAULT_FEATURE_REQUESTS_PER_MIN,
     overlap_days: int = 7,
     exclude_names: list[str] | None = None,
     per_request_sleep_seconds: float | None = None,
+    max_workers: int = 1,
 ) -> dict[str, object]:
     pro = create_tushare_client(token=token, http_url=http_url)
     stock_basic_df = pro.stock_basic(exchange="", list_status="L", fields="ts_code,name")
@@ -1270,8 +1342,9 @@ def sync_case_stock_bundle_to_db(
         last_cursor = state["last_success_cursor"] if state else None
 
         def _fetch(ts_code: str, planned_start_date: str, planned_end_date: str) -> dict[str, pd.DataFrame]:
+            local_pro = pro if max_workers <= 1 else create_tushare_client(token=token, http_url=http_url)
             return fetch_case_stock_bundle(
-                pro,
+                local_pro,
                 ts_code,
                 planned_start_date,
                 planned_end_date,
@@ -1293,6 +1366,7 @@ def sync_case_stock_bundle_to_db(
             end_date=end_date,
             overlap_days=overlap_days,
             sleep_seconds=sleep_seconds,
+            max_workers=max_workers,
         )
     return sync_config
 
@@ -1306,10 +1380,11 @@ def sync_stock_file_bundle_to_db(
     target_key: str,
     db_dsn: str = DEFAULT_DB_DSN,
     http_url: str = DEFAULT_TUSHARE_HTTP_URL,
-    requests_per_min: int = 20,
+    requests_per_min: int = DEFAULT_FEATURE_REQUESTS_PER_MIN,
     overlap_days: int = 7,
     code_column: str = "股票代码",
     per_request_sleep_seconds: float | None = None,
+    max_workers: int = 1,
 ) -> dict[str, object]:
     pro = create_tushare_client(token=token, http_url=http_url)
     stock_codes = load_stock_codes_from_csv(stock_file_path, code_column=code_column)
@@ -1331,8 +1406,9 @@ def sync_stock_file_bundle_to_db(
         last_cursor = state["last_success_cursor"] if state else None
 
         def _fetch(ts_code: str, planned_start_date: str, planned_end_date: str) -> dict[str, pd.DataFrame]:
+            local_pro = pro if max_workers <= 1 else create_tushare_client(token=token, http_url=http_url)
             return fetch_case_stock_bundle(
-                pro,
+                local_pro,
                 ts_code,
                 planned_start_date,
                 planned_end_date,
@@ -1354,6 +1430,7 @@ def sync_stock_file_bundle_to_db(
             end_date=end_date,
             overlap_days=overlap_days,
             sleep_seconds=0.0,
+            max_workers=max_workers,
         )
     return sync_config
 
@@ -1435,8 +1512,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
     case_parser.add_argument("--token", default=None, help="Tushare token")
     case_parser.add_argument("--db-dsn", default=None, help="PostgreSQL DSN")
     case_parser.add_argument("--http-url", default=None, help="Tushare 代理地址")
-    case_parser.add_argument("--requests-per-min", type=int, default=20, help="每分钟请求上限")
+    case_parser.add_argument("--requests-per-min", type=int, default=DEFAULT_FEATURE_REQUESTS_PER_MIN, help="每分钟请求上限")
     case_parser.add_argument("--overlap-days", type=int, default=7, help="断点续传回补天数")
+    case_parser.add_argument("--max-workers", type=int, default=1, help="股票级并发数")
     case_parser.add_argument("--exclude-name", action="append", default=[], help="排除指定标的名称，可重复传入")
 
     file_parser = subparsers.add_parser("sync-stock-file", help="同步股票清单文件中的股票包")
@@ -1449,8 +1527,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
     file_parser.add_argument("--token", default=None, help="Tushare token")
     file_parser.add_argument("--db-dsn", default=None, help="PostgreSQL DSN")
     file_parser.add_argument("--http-url", default=None, help="Tushare 代理地址")
-    file_parser.add_argument("--requests-per-min", type=int, default=20, help="每分钟请求上限")
+    file_parser.add_argument("--requests-per-min", type=int, default=DEFAULT_FEATURE_REQUESTS_PER_MIN, help="每分钟请求上限")
     file_parser.add_argument("--overlap-days", type=int, default=7, help="断点续传回补天数")
+    file_parser.add_argument("--max-workers", type=int, default=5, help="股票级并发数")
 
     concept_parser = subparsers.add_parser("sync-stock-file-concepts", help="同步股票清单文件对应的概念映射与概念指数")
     concept_parser.add_argument("--stock-file", required=True, help="股票清单 CSV 路径")
@@ -1523,6 +1602,7 @@ def main(argv: list[str] | None = None) -> int:
             requests_per_min=args.requests_per_min,
             overlap_days=args.overlap_days,
             exclude_names=args.exclude_name,
+            max_workers=args.max_workers,
         )
         logger.info("案例股票包同步完成: %s", sync_config)
         return 0
@@ -1541,6 +1621,7 @@ def main(argv: list[str] | None = None) -> int:
             http_url=http_url,
             requests_per_min=args.requests_per_min,
             overlap_days=args.overlap_days,
+            max_workers=args.max_workers,
         )
         logger.info("股票清单同步完成: %s", sync_config)
         return 0
