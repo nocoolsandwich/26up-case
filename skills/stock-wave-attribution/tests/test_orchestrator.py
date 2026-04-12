@@ -231,6 +231,122 @@ class StockWaveOrchestratorTest(unittest.TestCase):
             self.assertIn("- 波段审查：`agent_rerank`", markdown)
             self.assertIn("- 一句话逻辑：`存储涨价与 AI 存储升级共振。`", markdown)
 
+    def test_finalize_agent_rerank_task_marks_concept_skipped_explicitly(self):
+        module = load_module()
+        stock_df = pd.DataFrame(
+            [
+                {"trade_date": "2026-02-09", "open_qfq": 10.0, "high_qfq": 10.6, "low_qfq": 9.9, "close_qfq": 10.5},
+                {"trade_date": "2026-04-09", "open_qfq": 17.0, "high_qfq": 17.5, "low_qfq": 16.8, "close_qfq": 17.3},
+            ]
+        )
+        stock_bundle = {
+            "raw_stock_daily_qfq": stock_df,
+            "raw_daily_basic": pd.DataFrame([{"trade_date": "2026-02-09", "turnover_rate": 5.1}]),
+            "raw_moneyflow": pd.DataFrame([{"trade_date": "2026-04-09", "net_mf_amount": 3200.0}]),
+            "raw_limit_list_d": pd.DataFrame([{"trade_date": "2026-04-09", "limit_status": "U", "open_times": 0}]),
+        }
+        news_rows = [
+            {
+                "published_at": "2026-02-09 15:30",
+                "source_id": "zsxq_saidao_touyan",
+                "title": "奥瑞德进入算力电源涨停板",
+                "raw_text": "美国数据中心建设热潮引发用电荒，奥瑞德进入数据中心电源涨停板。",
+                "url": "https://example.com/aurora",
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rerank_root = Path(tmpdir)
+            module.prepare_agent_rerank_task(
+                case_context={
+                    "stock_name": "奥瑞德",
+                    "ts_code": "600666.SH",
+                    "start_date": "2026-01-01",
+                    "end_date": "2026-04-09",
+                    "sample_label": "算力",
+                },
+                stock_bundle=stock_bundle,
+                news_evidence=news_rows,
+                concept_frames={},
+                concept_labels={},
+                rerank_root=rerank_root,
+                task_id="attr-rerank",
+                segmenter=lambda df: [
+                    {
+                        "start_date": "2026-02-09",
+                        "peak_date": "2026-04-09",
+                        "start_price": 10.0,
+                        "peak_price": 17.3,
+                        "wave_gain_pct": 73.0,
+                        "bars": 2,
+                    }
+                ],
+            )
+            selection_path = rerank_root / "final_selection.json"
+            selection_path.write_text(
+                json.dumps(
+                    {
+                        "one_liner": "奥瑞德受益于算力租赁与智算中心重估。",
+                        "waves": [
+                            {
+                                "wave_id": "W1",
+                                "one_line_logic": "奥瑞德受益于算力租赁与智算中心重估。",
+                                "final_picks": [
+                                    {
+                                        "item_id": "I00001",
+                                        "role": "启动期强化",
+                                        "reason": "直接由 agent 入围。",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_plotter(df, waves, output_path, title, style="enhanced"):
+                output = Path(output_path)
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"fake-png")
+                return {"output_path": str(output), "candles_plotted": len(df), "waves_annotated": len(waves), "style": style}
+
+            result = module.finalize_agent_rerank_task(
+                case_context={
+                    "stock_name": "奥瑞德",
+                    "ts_code": "600666.SH",
+                    "start_date": "2026-01-01",
+                    "end_date": "2026-04-09",
+                    "sample_label": "算力",
+                },
+                stock_bundle=stock_bundle,
+                news_evidence=news_rows,
+                concept_frames={},
+                concept_labels={},
+                rerank_root=rerank_root,
+                selection_path=selection_path,
+                output_root=rerank_root,
+                segmenter=lambda df: [
+                    {
+                        "start_date": "2026-02-09",
+                        "peak_date": "2026-04-09",
+                        "start_price": 10.0,
+                        "peak_price": 17.3,
+                        "wave_gain_pct": 73.0,
+                        "bars": 2,
+                    }
+                ],
+                plotter=fake_plotter,
+                skip_concept=True,
+            )
+
+            markdown = Path(result["report_path"]).read_text(encoding="utf-8")
+            self.assertIn("已显式跳过概念联动，本次不做概念联动验证。", markdown)
+            self.assertIn("已显式跳过概念联动，本次依据精选 news 与量价验证。", markdown)
+            self.assertNotIn("概念联动与精选 news 共振验证。", markdown)
+
     def test_render_news_raw_blocks_orders_by_published_at_ascending(self):
         module = load_module()
 
@@ -1082,7 +1198,7 @@ class StockWaveOrchestratorTest(unittest.TestCase):
                         "  token: dummy-token",
                         "  http_url: http://example.com",
                         "paths:",
-                        f"  analysis_dir: {tmpdir}/docs/analysis",
+                        f"  analysis_dir: {tmpdir}/outputs/analysis",
                         f"  plot_dir: {tmpdir}/data/plots",
                         f"  cache_dir: {tmpdir}/data/stock_cache",
                         "chatgpt:",
@@ -1118,7 +1234,7 @@ class StockWaveOrchestratorTest(unittest.TestCase):
         self.assertIn("五洲新春", calls["keywords"])
         self.assertIn("机器人", calls["keywords"])
         self.assertIn("人形机器人", calls["keywords"])
-        self.assertTrue(str(calls["analysis_dir"]).endswith("/docs/analysis"))
+        self.assertTrue(str(calls["analysis_dir"]).endswith("/outputs/analysis"))
         self.assertTrue(str(calls["plot_dir"]).endswith("/data/plots"))
         self.assertEqual(result["report_path"], "/tmp/fake-report.md")
 
@@ -1167,7 +1283,7 @@ class StockWaveOrchestratorTest(unittest.TestCase):
                         "  token: dummy-token",
                         "  http_url: http://example.com",
                         "paths:",
-                        f"  analysis_dir: {tmpdir}/docs/analysis",
+                        f"  analysis_dir: {tmpdir}/outputs/analysis",
                         f"  plot_dir: {tmpdir}/data/plots",
                         f"  cache_dir: {tmpdir}/data/stock_cache",
                         "chatgpt:",
@@ -1295,7 +1411,7 @@ class StockWaveOrchestratorTest(unittest.TestCase):
                         "  token: dummy-token",
                         "  http_url: http://example.com",
                         "paths:",
-                        f"  analysis_dir: {tmpdir}/docs/analysis",
+                        f"  analysis_dir: {tmpdir}/outputs/analysis",
                         f"  plot_dir: {tmpdir}/data/plots",
                         f"  cache_dir: {tmpdir}/data/stock_cache",
                         "chatgpt:",
@@ -1477,7 +1593,7 @@ class StockWaveOrchestratorTest(unittest.TestCase):
                         "  token: dummy-token",
                         "  http_url: http://example.com",
                         "paths:",
-                        f"  analysis_dir: {tmpdir}/docs/analysis",
+                        f"  analysis_dir: {tmpdir}/outputs/analysis",
                         f"  plot_dir: {tmpdir}/data/plots",
                         f"  cache_dir: {tmpdir}/data/stock_cache",
                         "chatgpt:",
@@ -1513,6 +1629,240 @@ class StockWaveOrchestratorTest(unittest.TestCase):
         self.assertEqual(calls["persist"], [("300476.SZ", ["ana_concept_day", "ana_stock_concept_map"])])
         self.assertIn("算力PCB", calls["keywords"])
         self.assertEqual(result["report_path"], "/tmp/fake-report.md")
+
+    def test_run_local_attribution_task_can_skip_concepts_explicitly(self):
+        module = load_module()
+        stock_bundle = {
+            "raw_stock_daily_qfq": pd.DataFrame(
+                [
+                    {
+                        "trade_date": "2025-01-02",
+                        "open_qfq": 10.0,
+                        "high_qfq": 10.5,
+                        "low_qfq": 9.8,
+                        "close_qfq": 10.4,
+                    },
+                    {
+                        "trade_date": "2026-04-07",
+                        "open_qfq": 15.0,
+                        "high_qfq": 15.5,
+                        "low_qfq": 14.8,
+                        "close_qfq": 15.2,
+                    },
+                ]
+            ),
+            "raw_daily_basic": pd.DataFrame(),
+            "raw_moneyflow": pd.DataFrame(),
+            "raw_limit_list_d": pd.DataFrame(),
+        }
+        calls = {"news_keywords": None}
+
+        class _DummyConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        def fake_connect(_dsn):
+            return _DummyConnection()
+
+        def fake_stock_bundle_fetcher(conn, ts_code, start_date, end_date):
+            self.assertIsInstance(conn, _DummyConnection)
+            return stock_bundle
+
+        def fake_concept_fetcher(*_args, **_kwargs):
+            raise AssertionError("skip_concept=True 时不应读取概念数据")
+
+        def fake_tushare_concept_fetcher(*_args, **_kwargs):
+            raise AssertionError("skip_concept=True 时不应触发 Tushare 概念补库")
+
+        def fake_news_fetcher(conn, start_date, end_date, keywords):
+            self.assertIsInstance(conn, _DummyConnection)
+            calls["news_keywords"] = list(keywords)
+            return []
+
+        def fake_runner(case_context, stock_bundle, news_evidence, concept_frames, concept_labels, **kwargs):
+            self.assertEqual(case_context["stock_name"], "奥瑞德")
+            self.assertEqual(concept_frames, {})
+            self.assertEqual(concept_labels, {})
+            return {
+                "report_path": "/tmp/aurora-report.md",
+                "plot_path": "/tmp/aurora-plot.png",
+                "report_contract_path": "/tmp/contract.md",
+                "call_chain": ["runtime/wave_segmentation.py"],
+                "wave_count": 1,
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "stock-wave-attribution.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "postgres:",
+                        "  event_news_dsn: postgresql://tester@localhost:5432/event_news",
+                        "  event_quant_dsn: postgresql://tester@localhost:5432/event_quant",
+                        "tushare:",
+                        "  token: invalid-token",
+                        "  http_url: http://example.com",
+                        "paths:",
+                        f"  analysis_dir: {tmpdir}/outputs/analysis",
+                        f"  plot_dir: {tmpdir}/data/plots",
+                        f"  cache_dir: {tmpdir}/data/stock_cache",
+                        "chatgpt:",
+                        "  enabled: false",
+                        "  node_bin: node",
+                        "  script_path: ../chatgpt-plus-browser/scripts/chatgpt_cdp.mjs",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = module.run_local_attribution_task(
+                stock_name="奥瑞德",
+                ts_code="600666.SH",
+                start_date="2025-09-01",
+                end_date="2026-04-09",
+                sample_label="算力",
+                skip_concept=True,
+                config_path=config_path,
+                db_connect=fake_connect,
+                stock_bundle_fetcher=fake_stock_bundle_fetcher,
+                concept_fetcher=fake_concept_fetcher,
+                news_fetcher=fake_news_fetcher,
+                tushare_concept_bundle_fetcher=fake_tushare_concept_fetcher,
+                attribution_runner=fake_runner,
+            )
+
+        self.assertEqual(calls["news_keywords"], ["奥瑞德", "算力"])
+        self.assertEqual(result["report_path"], "/tmp/aurora-report.md")
+
+    def test_prepare_agent_rerank_parser_accepts_skip_concept(self):
+        module = load_module()
+
+        parser = module._build_prepare_agent_rerank_parser()
+        args = parser.parse_args(
+            [
+                "--stock-name",
+                "奥瑞德",
+                "--ts-code",
+                "600666.SH",
+                "--start-date",
+                "2025-09-01",
+                "--end-date",
+                "2026-04-09",
+                "--sample-label",
+                "算力",
+                "--task-id",
+                "attr-test",
+                "--skip-concept",
+            ]
+        )
+
+        self.assertTrue(args.skip_concept)
+
+    def test_build_local_verdict_marks_skip_concept_in_notes(self):
+        module = load_module()
+
+        verdict = module._build_local_verdict(
+            case_context={"stock_name": "奥瑞德", "sample_label": "算力"},
+            selected_news=[
+                {
+                    "title": "奥瑞德进入算力租赁涨停板",
+                    "raw_text": "奥瑞德进入算力租赁涨停板并强化智算中心预期。",
+                }
+            ],
+            concept_rows=[],
+            quant_rows=[{"metric": "区间涨幅", "value": "73.54%", "evidence": "close_qfq", "interpretation": "观察总涨幅"}],
+            skip_concept=True,
+        )
+
+        self.assertIn("显式跳过概念联动", verdict["final_verdict"]["notes"])
+        self.assertIn("显式跳过概念联动", verdict["conclusion_rows"][0]["notes"])
+
+    def test_collect_wave_news_rows_respects_explicit_lookback_days(self):
+        module = load_module()
+
+        rows = module._collect_wave_news_rows(
+            news_evidence=[
+                {
+                    "published_at": "2025-06-25 09:00",
+                    "source_id": "zsxq_damao",
+                    "title": "过早旧闻",
+                    "raw_text": "不应进入 14 天窗口。",
+                    "url": "https://example.com/old",
+                },
+                {
+                    "published_at": "2025-07-31 09:00",
+                    "source_id": "zsxq_damao",
+                    "title": "启动前强信号",
+                    "raw_text": "应进入 14 天窗口。",
+                    "url": "https://example.com/pre",
+                },
+                {
+                    "published_at": "2025-08-12 09:00",
+                    "source_id": "zsxq_saidao_touyan",
+                    "title": "波段内催化",
+                    "raw_text": "位于波段内。",
+                    "url": "https://example.com/in",
+                },
+            ],
+            waves=[
+                {
+                    "start_date": "2025-08-11",
+                    "peak_date": "2025-08-13",
+                }
+            ],
+            lookback_days=14,
+        )
+
+        titles = [row["title"] for row in rows]
+        self.assertEqual(titles, ["启动前强信号", "波段内催化"])
+
+    def test_build_local_verdict_ignores_sample_label_bias_and_single_noise_terms(self):
+        module = load_module()
+
+        verdict = module._build_local_verdict(
+            case_context={"stock_name": "数据港", "sample_label": "算力租赁"},
+            selected_news=[
+                {
+                    "title": "数据港调研纪要",
+                    "raw_text": "数据中心需求持续增长，数据港与阿里云深度绑定。",
+                },
+                {
+                    "title": "IDC观点更新",
+                    "raw_text": "数据中心供需改善，项目交付在即。",
+                },
+                {
+                    "title": "阿里云产业链梳理",
+                    "raw_text": "IDC：数据港（主供）。液冷：英维克。",
+                },
+            ],
+            concept_rows=[
+                {
+                    "concept_name": "数据中心",
+                    "concept_code": "885887.TI",
+                    "period_return_pct": "9.76%",
+                    "close_corr": "0.6425",
+                    "ret_corr": "0.3321",
+                    "interpretation": "主线更贴近。",
+                },
+                {
+                    "concept_name": "液冷服务器",
+                    "concept_code": "886044.TI",
+                    "period_return_pct": "19.70%",
+                    "close_corr": "0.7383",
+                    "ret_corr": "0.3177",
+                    "interpretation": "仅相关配套。",
+                },
+            ],
+            quant_rows=[{"metric": "区间涨幅", "value": "52.96%", "evidence": "close_qfq", "interpretation": "观察总涨幅"}],
+        )
+
+        self.assertEqual(verdict["main_cause"], "数据中心")
+        self.assertEqual(verdict["alt_cause"], "数据中心板块情绪强化")
+        self.assertNotIn("液冷", verdict["main_cause"])
+        self.assertNotIn("算力租赁", verdict["final_verdict"]["final_judgment"])
 
     def test_main_run_prints_json_result(self):
         module = load_module()

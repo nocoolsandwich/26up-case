@@ -61,6 +61,28 @@ def test_create_task_returns_task_id(tmp_path) -> None:
     payload = response.json()
     assert payload["task_id"]
     assert payload["status"] == "queued"
+    assert payload["news_lookback_days"] == 14
+
+
+def test_create_task_accepts_skip_concept_flag(tmp_path) -> None:
+    app = create_app(task_root=tmp_path / "service_tasks", workspace_root=tmp_path)
+    client = TestClient(app)
+
+    response = client.post(
+        "/tasks/attribution",
+        json={
+            "stock_name": "奥瑞德",
+            "ts_code": "600666.SH",
+            "start_date": "2025-09-01",
+            "end_date": "2026-04-09",
+            "sample_label": "算力",
+            "skip_concept": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["skip_concept"] is True
 
 
 def test_get_task_returns_saved_status(tmp_path) -> None:

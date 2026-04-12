@@ -374,7 +374,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--file", dest="file_path")
     parser.add_argument("--all", action="store_true", dest="migrate_all")
     parser.add_argument("--dsn", default=DEFAULT_EVENT_NEWS_DSN)
-    parser.add_argument("--analysis-dir", default="docs/analysis")
+    parser.add_argument("--analysis-dir", default="outputs/analysis")
     args = parser.parse_args(argv)
 
     if not args.file_path and not args.migrate_all:

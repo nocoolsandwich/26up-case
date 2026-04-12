@@ -151,7 +151,7 @@
   "sample_label": "5G",
   "status": "completed",
   "stage": "completed",
-  "report_path": "/abs/path/docs/analysis/2026-03-25-688375SH-国博电子-wave-attribution.md",
+  "report_path": "/abs/path/outputs/analysis/2026-03-25-688375SH-国博电子-wave-attribution.md",
   "plot_path": "/abs/path/data/plots/688375_SH_wave_candles.png",
   "log_path": "/abs/path/data/service_logs/attr-xxx.log",
   "chatgpt_task_id": "d7b0a15f-688a-41af-b738-ec8d9ab5290a",
@@ -248,4 +248,4 @@
 - 仅支持单票归因
 - 任务状态存储在 `data/service_tasks/`
 - 执行日志存储在 `data/service_logs/`
-- 报告继续落在 `docs/analysis/`
+- 报告继续落在 `outputs/analysis/`

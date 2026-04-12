@@ -29,7 +29,7 @@ class StockWaveAttributionProjectSkillTest(unittest.TestCase):
         self.assertIn("runtime/config.py", payload["runtime_files"])
         self.assertIn("stock-wave-attribution.yaml", payload["runtime_files"])
         self.assertIn("chatgpt-plus-browser", payload["skill_dependencies"])
-        self.assertIn("docs/analysis", payload["output_targets"])
+        self.assertIn("outputs/analysis", payload["output_targets"])
         self.assertIn("wave review without web search", payload["planned_capabilities"])
 
 

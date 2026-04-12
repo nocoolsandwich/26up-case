@@ -22,6 +22,7 @@
 - `runtime/attribution_data.py`：量价、news、概念验证辅助函数；其中 `news` 先候选召回
 - 量价窗口默认从 `event_quant` 读取；若窗口不足，编排层会先用 `Akshare` 补库，再回读数据库继续归因
 - 概念映射与概念日线默认也从 `event_quant.ana_stock_concept_map / ana_concept_day` 读取；若为空，编排层会先用 `Tushare 代理` 回填后再回读数据库
+  - 如需显式跳过概念联动，可在 `run / prepare-agent-rerank / finalize-agent-rerank` 追加 `--skip-concept`
 - `runtime/wave_segmentation.py`：波段切分
 - `runtime/wave_plotting.py`：K 线绘图
 - `stock-wave-attribution.yaml`：默认配置模板
@@ -48,7 +49,7 @@
 - `SKILL.md`：项目内 skill 使用口径
 - `skill_manifest.json`：依赖、边界、输出目标
 - `scripts/project_skill.py`：最小可运行入口
-- `tests/test_project_skill.py`：入口回归测试
+- `tests/test_stock_wave_project_skill.py`：入口回归测试
 
 ## 使用方式
 
@@ -63,7 +64,8 @@ python skills/stock-wave-attribution/scripts/orchestrator.py run \
   --ts-code 603667.SH \
   --start-date 2025-11-05 \
   --end-date 2026-01-22 \
-  --sample-label 机器人概念
+  --sample-label 机器人概念 \
+  [--skip-concept]
 ```
 
 5. 服务模式默认不走 `run_chatgpt_browser`，而是：
@@ -75,6 +77,7 @@ python skills/stock-wave-attribution/scripts/orchestrator.py prepare-agent-reran
   --start-date 2025-11-05 \
   --end-date 2026-01-22 \
   --sample-label 机器人概念 \
+  [--skip-concept] \
   --task-id attr-demo
 
 python skills/stock-wave-attribution/scripts/orchestrator.py finalize-agent-rerank \
@@ -83,6 +86,7 @@ python skills/stock-wave-attribution/scripts/orchestrator.py finalize-agent-rera
   --start-date 2025-11-05 \
   --end-date 2026-01-22 \
   --sample-label 机器人概念 \
+  [--skip-concept] \
   --task-id attr-demo \
   --selection-path data/service_tasks/attr-demo/agent_rerank/final_selection.json
 ```

@@ -45,7 +45,7 @@ uvicorn service.app:app --reload
 
 ## 产物目录
 
-- 报告：`docs/analysis/`
+- 报告：`outputs/analysis/`
 - 图片：`data/plots/`
 - 粗排工件：`data/service_tasks/<task-id>/agent_rerank/`
 
@@ -69,6 +69,7 @@ python skills/stock-wave-attribution/scripts/orchestrator.py prepare-agent-reran
   --start-date <开始日期> \
   --end-date <结束日期> \
   --sample-label <标签> \
+  [--skip-concept] \
   --task-id <任务ID>
 
 python skills/stock-wave-attribution/scripts/orchestrator.py finalize-agent-rerank \
@@ -77,9 +78,14 @@ python skills/stock-wave-attribution/scripts/orchestrator.py finalize-agent-rera
   --start-date <开始日期> \
   --end-date <结束日期> \
   --sample-label <标签> \
+  [--skip-concept] \
   --task-id <任务ID> \
   --selection-path data/service_tasks/<任务ID>/agent_rerank/final_selection.json
 ```
+
+- 当单票概念底表缺失、但你仍然要先产出归因时，可显式追加 `--skip-concept`
+  - 此时量价、news、波段归因仍正常执行
+  - `概念联动验证表` 会允许为空
 
 - 两阶段之间由 Codex 读取 `summary.json` 和各波段 `rough_chunks/chunk_*.md`
   - 每个 chunk 直接 `100选3-5`

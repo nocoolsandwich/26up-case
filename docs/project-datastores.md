@@ -232,7 +232,7 @@ PY
    - `data/wencai_top400_20250910_20260309.csv`
    - `data/top400_industry_map.csv`
    - `data/top400_industry_frequency.csv`
-   - `docs/analysis/`
+   - `outputs/analysis/`
 6. 如需继续同步
    - 个股量价：`event_quant_sync.py sync-stock-file`
    - 全市场个股量价：`event_quant_sync.py sync-all-stocks`

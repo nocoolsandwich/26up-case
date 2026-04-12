@@ -3,11 +3,11 @@ postgres:
   event_quant_dsn: postgresql://postgres:postgres@localhost:5432/event_quant
 
 tushare:
-  token: REPLACE_WITH_TUSHARE_TOKEN
+  token: 9740cb8076d805384a77f3bc5cca503473fb2361788db7292164e0285f40
   http_url: http://lianghua.nanyangqiankun.top
 
 paths:
-  analysis_dir: ../../docs/analysis
+  analysis_dir: ../../outputs/analysis
   plot_dir: ../../data/plots
   cache_dir: ../../data/stock_cache
 

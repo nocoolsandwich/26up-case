@@ -30,7 +30,7 @@ def test_build_codex_prompt_contains_skill_and_task_context() -> None:
     assert "腾景科技（688195.SH）" in prompt
     assert "2025-09-10" in prompt
     assert "2026-03-09" in prompt
-    assert "docs/analysis" in prompt
+    assert "outputs/analysis" in prompt
     assert "prepare-agent-rerank" in prompt
     assert "finalize-agent-rerank" in prompt
     assert "100 选 3-5" in prompt
@@ -86,6 +86,49 @@ def test_build_agent_rerank_commands_use_direct_orchestrator_entry() -> None:
     assert "finalize-agent-rerank" in finalize_command
     assert "final_selection.json" in finalize_command
     assert "--task-id" in finalize_command
+
+
+def test_build_agent_rerank_commands_append_skip_concept_when_requested() -> None:
+    task = AttributionTask(
+        task_id="attr-skip-concept",
+        stock_name="奥瑞德",
+        ts_code="600666.SH",
+        start_date="2025-09-01",
+        end_date="2026-04-09",
+        sample_label="算力",
+        skip_concept=True,
+    )
+
+    run_command = build_skill_run_command(task)
+    prepare_command = build_prepare_agent_rerank_command(task)
+    finalize_command = build_finalize_agent_rerank_command(task)
+    prompt = build_codex_prompt(task)
+
+    assert "--skip-concept" in run_command
+    assert "--skip-concept" in prepare_command
+    assert "--skip-concept" in finalize_command
+    assert "概念联动：已显式跳过" in prompt
+
+
+def test_build_agent_rerank_commands_append_service_news_lookback_days() -> None:
+    task = AttributionTask(
+        task_id="attr-lookback",
+        stock_name="数据港",
+        ts_code="603881.SH",
+        start_date="2025-01-01",
+        end_date="2026-04-09",
+        sample_label="数据中心",
+    )
+
+    prepare_command = build_prepare_agent_rerank_command(task)
+    finalize_command = build_finalize_agent_rerank_command(task)
+    prompt = build_codex_prompt(task)
+
+    assert "--news-lookback-days" in prepare_command
+    assert "--news-lookback-days" in finalize_command
+    assert "14" in prepare_command
+    assert "14" in finalize_command
+    assert "新闻窗口：波段起点前 14 天到波段结束" in prompt
 
 
 def test_build_codex_command_wraps_prompt_for_codex_cli() -> None:

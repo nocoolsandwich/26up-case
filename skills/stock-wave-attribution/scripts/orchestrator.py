@@ -47,6 +47,24 @@ def _require_pandas():
         raise ModuleNotFoundError("pandas is required for wave attribution orchestration")
 
 
+def _news_selection_module():
+    from runtime import news_selection
+
+    return news_selection
+
+
+def _report_rendering_module():
+    from runtime import report_rendering
+
+    return report_rendering
+
+
+def _verdicts_module():
+    from runtime import verdicts
+
+    return verdicts
+
+
 def _default_plotter(*args, **kwargs):
     from runtime.wave_plotting import plot_candlestick_waves
 
@@ -170,39 +188,11 @@ def run_chatgpt_browser(
 
 
 def _table(headers: list[str], rows: list[list[Any]]) -> str:
-    header_line = "| " + " | ".join(headers) + " |"
-    separator = "|" + "|".join(["---"] * len(headers)) + "|"
-    body = ["| " + " | ".join("" if value is None else str(value) for value in row) + " |" for row in rows]
-    return "\n".join([header_line, separator, *body])
+    return _report_rendering_module().table(headers, rows)
 
 
 def _render_news_raw_blocks(rows: list[dict[str, Any]]) -> str:
-    if not rows:
-        return "暂无匹配证据原文。"
-
-    raw_blocks: list[str] = []
-    ordered = sorted(rows, key=lambda row: _to_naive_timestamp(row.get("published_at")))
-    for index, row in enumerate(ordered, start=1):
-        published_at = _format_display_time(row.get("published_at", ""))
-        source_id = str(row.get("source_id", ""))
-        title = str(row.get("title", ""))
-        raw_text = str(row.get("raw_text", ""))
-        url = str(row.get("url", ""))
-        raw_blocks.extend(
-            [
-                f"#### 证据 {index}",
-                f"- 时间：`{published_at}`",
-                f"- 来源：`{source_id}`",
-                f"- 标题：{title}",
-                f"- 链接：[link]({url})",
-                "- 原文：",
-                "```text",
-                raw_text,
-                "```",
-                "",
-            ]
-        )
-    return "\n".join(raw_blocks).rstrip()
+    return _report_rendering_module().render_news_raw_blocks(rows)
 
 
 def _format_percent(value: float | int | str) -> str:
@@ -212,13 +202,7 @@ def _format_percent(value: float | int | str) -> str:
 
 
 def _clean_theme_label(value: str) -> str:
-    text = str(value or "").strip()
-    for suffix in ("概念股", "概念", "主线", "主题"):
-        if text.endswith(suffix):
-            stripped = text[: -len(suffix)].strip()
-            if stripped:
-                return stripped
-    return text
+    return _verdicts_module().clean_theme_label(value)
 
 
 def _compact_catalyst_label(title: str, stock_name: str) -> str:
@@ -229,11 +213,7 @@ def _compact_catalyst_label(title: str, stock_name: str) -> str:
 
 
 def _display_final_judgment(text: str) -> str:
-    sentence = str(text or "").strip()
-    for prefix in ("这轮主升更偏向", "这轮主升主要由"):
-        if sentence.startswith(prefix):
-            return sentence[len(prefix) :].strip()
-    return sentence
+    return _verdicts_module().display_final_judgment(text)
 
 
 def _has_usable_tushare_token(token: str | None) -> bool:
@@ -247,62 +227,57 @@ def _pick_main_concept(
     sample_label_clean: str,
     news_corpus: str,
 ) -> str:
-    best_name = ""
-    best_score = -1
-    for index, row in enumerate(concept_rows):
-        concept_name = _clean_theme_label(str(row.get("concept_name", "")))
-        if not concept_name:
-            continue
-        score = max(20 - index * 2, 0)
-        if sample_label_clean and (sample_label_clean in concept_name or concept_name in sample_label_clean):
-            score += 120
-        if concept_name and concept_name in news_corpus:
-            score += 60
-        if score > best_score:
-            best_score = score
-            best_name = concept_name
-    return best_name
+    return _verdicts_module().pick_main_concept(
+        concept_rows=concept_rows,
+        sample_label_clean=sample_label_clean,
+        news_corpus=news_corpus,
+    )
+
+
+def _build_news_signal_segments(selected_news: list[dict[str, Any]]) -> list[str]:
+    segments: list[str] = []
+    for row in selected_news:
+        title = " ".join(str(row.get("title", "")).split())
+        summary = _summarize_timeline_impact(str(row.get("raw_text", "")))
+        segment = " ".join(part for part in [title, summary] if part).strip()
+        if segment:
+            segments.append(segment)
+    return segments
+
+
+def _count_signal_hits(signal_segments: list[str], needles: tuple[str, ...]) -> int:
+    return sum(1 for segment in signal_segments if any(needle and needle in segment for needle in needles))
+
+
+def _pick_mainline_from_news_signals(signal_segments: list[str]) -> str:
+    best_label = ""
+    best_hits = 0
+    for needles, label in (
+        (("数据中心", "IDC"), "数据中心"),
+        (("AIDC",), "AIDC"),
+        (("算力租赁",), "算力租赁"),
+        (("算力",), "算力"),
+        (("液冷",), "液冷"),
+        (("人形机器人",), "人形机器人"),
+        (("机器人",), "机器人"),
+        (("商业航天",), "商业航天"),
+        (("卫星",), "卫星互联网"),
+        (("CPO",), "CPO"),
+        (("硅光",), "硅光"),
+    ):
+        hits = _count_signal_hits(signal_segments, needles)
+        if hits > best_hits:
+            best_label = label
+            best_hits = hits
+    return best_label
 
 
 def _pick_catalyst_label(selected_news: list[dict[str, Any]], stock_name: str) -> str:
-    ordered = sorted(
-        selected_news,
-        key=lambda row: len(str(row.get("title", ""))),
-    )
-    for row in ordered:
-        title = str(row.get("title", "")).strip()
-        raw_first_line = _summarize_timeline_impact(str(row.get("raw_text", "")))
-        candidate = raw_first_line if "..." in title or len(title) > 28 else title
-        compact = _compact_catalyst_label(candidate, stock_name)
-        if compact and len(compact) <= 18:
-            return compact
-        for needle, label in (
-            ("T链", "T链催化"),
-            ("丝杠", "丝杠催化"),
-            ("人形机器人", "人形机器人催化"),
-            ("机器人", "机器人催化"),
-            ("商业航天", "商业航天催化"),
-            ("卫星", "卫星催化"),
-            ("液冷", "液冷催化"),
-            ("算力", "算力催化"),
-            ("AIDC", "AIDC催化"),
-            ("柔性直流", "柔性直流催化"),
-            ("特高压", "特高压催化"),
-            ("空间电源", "空间电源催化"),
-            ("砷化镓", "砷化镓催化"),
-            ("CPO", "CPO催化"),
-            ("硅光", "硅光催化"),
-        ):
-            if needle in candidate:
-                return label
-    return "启动催化"
+    return _verdicts_module().pick_catalyst_label(selected_news, stock_name)
 
 
 def _compose_final_judgment(main_cause: str, sample_label: str) -> str:
-    sample_label_clean = _clean_theme_label(sample_label)
-    if sample_label and sample_label_clean and sample_label_clean != main_cause:
-        return f"这轮主升更偏向{main_cause}主线，不是泛{sample_label_clean}概念跟涨。"
-    return f"这轮主升主要由{main_cause}驱动。"
+    return _verdicts_module().compose_final_judgment(main_cause, sample_label)
 
 
 def _build_local_verdict(
@@ -311,100 +286,19 @@ def _build_local_verdict(
     selected_news: list[dict[str, Any]],
     concept_rows: list[dict[str, str]],
     quant_rows: list[dict[str, str]],
+    skip_concept: bool = False,
 ) -> dict[str, Any]:
-    sample_label = str(case_context.get("sample_label", "")).strip()
-    sample_label_clean = _clean_theme_label(sample_label)
-    news_corpus = " ".join(
-        " ".join([str(row.get("title", "")), str(row.get("raw_text", ""))]) for row in selected_news
-    )
-
-    main_cause = _pick_main_concept(
+    return _verdicts_module().build_local_verdict(
+        case_context=case_context,
+        selected_news=selected_news,
         concept_rows=concept_rows,
-        sample_label_clean=sample_label_clean,
-        news_corpus=news_corpus,
+        quant_rows=quant_rows,
+        skip_concept=skip_concept,
     )
-    if not main_cause:
-        main_cause = sample_label_clean or sample_label or str(case_context.get("stock_name", "")).strip()
-    refinements: list[str] = []
-    for needle, label in (
-        ("T链", "T链"),
-        ("丝杠", "丝杠平台化"),
-        ("人形机器人", "人形机器人"),
-        ("机器人", "机器人"),
-        ("商业航天", "商业航天"),
-        ("卫星", "卫星互联网"),
-        ("液冷", "液冷"),
-        ("算力", "算力"),
-        ("AIDC", "AIDC"),
-        ("柔性直流", "柔性直流"),
-        ("特高压", "特高压"),
-        ("空间电源", "空间电源"),
-        ("砷化镓", "砷化镓"),
-        ("CPO", "CPO"),
-        ("硅光", "硅光"),
-    ):
-        if needle in news_corpus and label not in refinements and label != sample_label_clean and label != main_cause:
-            refinements.append(label)
-    if refinements:
-        main_parts = [main_cause, *refinements[:2]]
-        main_cause = " / ".join(dict.fromkeys(main_parts))
 
-    catalyst = _pick_catalyst_label(selected_news, str(case_context.get("stock_name", "")))
-    alt_cause = f"{sample_label_clean}板块情绪强化" if sample_label_clean else "板块情绪强化"
-    if alt_cause == main_cause and len(selected_news) > 1:
-        alt_cause = _compact_catalyst_label(
-            str(selected_news[1].get("title", "")),
-            str(case_context.get("stock_name", "")),
-        )
-    if not alt_cause:
-        alt_cause = "量价共振强化"
 
-    one_line_parts = [f"{main_cause}主线驱动"]
-    if catalyst and catalyst not in {main_cause, "启动催化"}:
-        one_line_parts.append(f"{catalyst}点火")
-    if alt_cause and alt_cause not in {main_cause, catalyst}:
-        one_line_parts.append(alt_cause if alt_cause.endswith("强化") else f"{alt_cause}强化")
-    one_line_logic = "，".join(one_line_parts).rstrip("，")
-    if one_line_logic:
-        one_line_logic = f"{one_line_logic}。"
-
-    confidence = "中高" if selected_news and concept_rows and quant_rows else "中"
-    final_judgment = _compose_final_judgment(main_cause, sample_label)
-    notes = "精选本地 news、量价与概念联动验证共同支撑。"
-    if catalyst and catalyst not in {main_cause, "启动催化"}:
-        notes = f"启动阶段由{catalyst}点火，精选本地 news、量价与概念联动验证共同支撑。"
-
-    conclusion_rows = [
-        {
-            "dimension": "主因",
-            "value": main_cause,
-            "confidence": confidence,
-            "notes": "概念联动与精选 news 共振验证。",
-        }
-    ]
-    if alt_cause and alt_cause != main_cause:
-        conclusion_rows.append(
-            {
-                "dimension": "备选",
-                "value": alt_cause,
-                "confidence": "中",
-                "notes": "作为辅助催化或板块情绪，不改写主因。",
-            }
-        )
-
-    return {
-        "one_line_logic": one_line_logic,
-        "main_cause": main_cause,
-        "alt_cause": alt_cause,
-        "final_verdict": {
-            "main_cause": main_cause,
-            "alt_cause": alt_cause,
-            "final_judgment": final_judgment,
-            "notes": notes,
-            "confidence": confidence,
-        },
-        "conclusion_rows": conclusion_rows,
-    }
+def _render_concept_section(wave_section: dict[str, Any]) -> str:
+    return _report_rendering_module().render_concept_section(wave_section)
 
 
 def build_wave_attribution_search_prompt(
@@ -471,26 +365,7 @@ def _build_news_keywords(
     sample_label: str,
     concept_labels: dict[str, dict[str, str]] | None = None,
 ) -> list[str]:
-    concept_labels = concept_labels or {}
-    raw_terms = [stock_name, sample_label, *[item.get("name", "") for item in concept_labels.values()]]
-    variants: list[str] = []
-    for term in raw_terms:
-        text = str(term).strip()
-        if not text:
-            continue
-        variants.append(text)
-        for suffix in ("概念", "概念股", "主题", "主线"):
-            if text.endswith(suffix):
-                trimmed = text[: -len(suffix)].strip()
-                if trimmed:
-                    variants.append(trimmed)
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for item in variants:
-        if item and item not in seen:
-            seen.add(item)
-            deduped.append(item)
-    return deduped
+    return _news_selection_module().build_news_keywords(stock_name, sample_label, concept_labels)
 
 
 def _chatgpt_enabled(use_chatgpt: bool | None = None) -> bool:
@@ -517,18 +392,11 @@ SOURCE_PRIORITY = {
 
 
 def _summarize_timeline_impact(raw_text: str) -> str:
-    text = str(raw_text or "")
-    for line in text.splitlines():
-        summary = line.strip()
-        if summary:
-            return summary
-    return ""
+    return _news_selection_module().summarize_timeline_impact(raw_text)
 
 
 def _normalize_news_key(row: dict[str, Any]) -> tuple[str, str]:
-    title = " ".join(str(row.get("title", "")).split())
-    summary = _summarize_timeline_impact(str(row.get("raw_text", "")))
-    return title, summary
+    return _news_selection_module().normalize_news_key(row)
 
 
 def _collect_news_terms(
@@ -536,59 +404,38 @@ def _collect_news_terms(
     sample_label: str,
     concept_labels: dict[str, dict[str, str]] | None = None,
 ) -> list[str]:
-    return _build_news_keywords(stock_name, sample_label, concept_labels)
+    return _news_selection_module().collect_news_terms(stock_name, sample_label, concept_labels)
 
 
 def _anchor_dates_from_waves(waves: list[dict[str, Any]]) -> list[pd.Timestamp]:
-    anchors: list[pd.Timestamp] = []
-    for wave in waves:
-        start_date = wave.get("start_date")
-        if start_date:
-            anchors.append(_to_naive_timestamp(start_date))
-    return anchors
+    return _news_selection_module().anchor_dates_from_waves(waves)
 
 
 def _news_window_from_waves(
     waves: list[dict[str, Any]],
     lookback_days: int = DEFAULT_NEWS_LOOKBACK_DAYS,
 ) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
-    starts = [_to_naive_timestamp(wave["start_date"]) for wave in waves if wave.get("start_date")]
-    peaks = [_to_naive_timestamp(wave["peak_date"]) for wave in waves if wave.get("peak_date")]
-    if not starts or not peaks:
-        return None, None
-    return min(starts) - pd.Timedelta(days=lookback_days), max(peaks)
+    return _news_selection_module().news_window_from_waves(waves, lookback_days)
 
 
 def _to_naive_timestamp(value: Any) -> pd.Timestamp:
-    timestamp = pd.Timestamp(value)
-    if timestamp.tzinfo is not None:
-        return timestamp.tz_convert("Asia/Shanghai").tz_localize(None)
-    return timestamp
+    return _news_selection_module().to_naive_timestamp(value)
 
 
 def _format_display_time(value: Any) -> str:
-    return _to_naive_timestamp(value).strftime("%Y-%m-%d %H:%M")
+    return _news_selection_module().format_display_time(value)
 
 
 def _format_wave_date(value: Any) -> str:
-    return _to_naive_timestamp(value).date().isoformat()
+    return _report_rendering_module().format_wave_date(value)
 
 
 def _format_wave_period(wave_section: dict[str, Any]) -> str:
-    if wave_section.get("start_date") and wave_section.get("peak_date"):
-        return f"{_format_wave_date(wave_section['start_date'])} -> {_format_wave_date(wave_section['peak_date'])}"
-    return str(wave_section.get("period", ""))
+    return _report_rendering_module().format_wave_period(wave_section)
 
 
 def _format_news_source_distribution(rows: list[dict[str, Any]]) -> str:
-    counts: dict[str, int] = {}
-    for row in rows:
-        source_id = str(row.get("source_id", "")).strip()
-        if not source_id:
-            continue
-        counts[source_id] = counts.get(source_id, 0) + 1
-    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
-    return " / ".join(f"{source}({count}条)" for source, count in ordered)
+    return _news_selection_module().format_news_source_distribution(rows)
 
 
 def _news_distance_score(published_at: pd.Timestamp, anchors: list[pd.Timestamp]) -> tuple[int, int]:
@@ -645,29 +492,16 @@ def _collect_ranked_news_candidates(
     sample_label: str,
     concept_labels: dict[str, dict[str, str]] | None,
     waves: list[dict[str, Any]],
+    lookback_days: int = DEFAULT_NEWS_LOOKBACK_DAYS,
 ) -> list[tuple[tuple[int, int, pd.Timestamp], dict[str, Any]]]:
-    anchors = _anchor_dates_from_waves(waves)
-    window_start, window_end = _news_window_from_waves(waves)
-    ranked_candidates: list[tuple[tuple[int, int, pd.Timestamp], dict[str, Any]]] = []
-    for row in news_evidence:
-        if str(row.get("source_id", "")) not in SOURCE_PRIORITY:
-            continue
-        published_at = _to_naive_timestamp(row.get("published_at"))
-        if window_start is not None and published_at < window_start:
-            continue
-        if window_end is not None and published_at > window_end:
-            continue
-        score_tuple = _score_news_row(
-            row,
-            stock_name=stock_name,
-            sample_label=sample_label,
-            concept_labels=concept_labels,
-            anchors=anchors,
-        )
-        ranked_candidates.append((score_tuple, row))
-    return sorted(
-        ranked_candidates,
-        key=lambda item: (-item[0][0], item[0][1], item[0][2]),
+    return _news_selection_module().collect_ranked_news_candidates(
+        news_evidence=news_evidence,
+        stock_name=stock_name,
+        sample_label=sample_label,
+        concept_labels=concept_labels,
+        waves=waves,
+        lookback_days=lookback_days,
+        source_priority=SOURCE_PRIORITY,
     )
 
 
@@ -679,115 +513,40 @@ def _select_news_evidence(
     concept_labels: dict[str, dict[str, str]] | None,
     waves: list[dict[str, Any]],
     top_k: int = DEFAULT_EVIDENCE_NEWS_LIMIT,
+    lookback_days: int = DEFAULT_NEWS_LOOKBACK_DAYS,
 ) -> list[dict[str, Any]]:
-    ranked_candidates = _collect_ranked_news_candidates(
+    return _news_selection_module().select_news_evidence(
         news_evidence=news_evidence,
         stock_name=stock_name,
         sample_label=sample_label,
         concept_labels=concept_labels,
         waves=waves,
+        top_k=top_k,
+        lookback_days=lookback_days,
+        source_priority=SOURCE_PRIORITY,
     )
-    best_by_key: dict[tuple[str, str], tuple[tuple[int, int, pd.Timestamp], dict[str, Any]]] = {}
-    for score_tuple, row in ranked_candidates:
-        key = _normalize_news_key(row)
-        current = best_by_key.get(key)
-        score_key = (-score_tuple[0], score_tuple[1], score_tuple[2])
-        current_key = None if current is None else (-current[0][0], current[0][1], current[0][2])
-        if current is None or score_key < current_key:
-            best_by_key[key] = (score_tuple, row)
-
-    ranked = sorted(
-        (item for item in best_by_key.values()),
-        key=lambda item: (-item[0][0], item[0][1], item[0][2]),
-    )
-    return [row for _, row in ranked[:top_k]]
 
 
 def _collect_wave_news_rows(
     *,
     news_evidence: list[dict[str, Any]],
     waves: list[dict[str, Any]],
+    lookback_days: int = DEFAULT_NEWS_LOOKBACK_DAYS,
 ) -> list[dict[str, Any]]:
-    window_start, window_end = _news_window_from_waves(waves)
-    rows: list[dict[str, Any]] = []
-    for row in news_evidence:
-        if str(row.get("source_id", "")) not in SOURCE_PRIORITY:
-            continue
-        published_at = _to_naive_timestamp(row.get("published_at"))
-        if window_start is not None and published_at < window_start:
-            continue
-        if window_end is not None and published_at > window_end:
-            continue
-        copied = dict(row)
-        copied["published_at"] = _format_display_time(published_at)
-        rows.append(copied)
-    return sorted(rows, key=lambda row: _to_naive_timestamp(row.get("published_at")))
+    return _news_selection_module().collect_wave_news_rows(
+        news_evidence=news_evidence,
+        waves=waves,
+        lookback_days=lookback_days,
+        source_priority=SOURCE_PRIORITY,
+    )
 
 
 def _candidate_title_key(row: dict[str, Any]) -> str:
-    title = str(row.get("title", "")).strip()
-    if title:
-        return title
-    key = _normalize_news_key(row)
-    return " | ".join(part for part in key if part).strip() or "untitled"
+    return _news_selection_module().candidate_title_key(row)
 
 
 def _build_agent_candidate_items(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged: dict[str, dict[str, Any]] = {}
-    for row in sorted(rows, key=lambda item: _to_naive_timestamp(item.get("published_at"))):
-        key = _candidate_title_key(row)
-        bucket = merged.setdefault(
-            key,
-            {
-                "title": str(row.get("title", "")).strip(),
-                "first_published_at": str(row.get("published_at", "")),
-                "last_published_at": str(row.get("published_at", "")),
-                "raw_count": 0,
-                "source_counts": {},
-                "representative_row": dict(row),
-                "sample_rows": [],
-            },
-        )
-        bucket["raw_count"] += 1
-        published_at = str(row.get("published_at", ""))
-        if published_at < bucket["first_published_at"]:
-            bucket["first_published_at"] = published_at
-            bucket["representative_row"] = dict(row)
-        if published_at > bucket["last_published_at"]:
-            bucket["last_published_at"] = published_at
-        source_id = str(row.get("source_id", "")).strip()
-        bucket["source_counts"][source_id] = int(bucket["source_counts"].get(source_id, 0)) + 1
-        if len(bucket["sample_rows"]) < 5:
-            bucket["sample_rows"].append(
-                {
-                    "published_at": published_at,
-                    "source_id": source_id,
-                    "raw_text": str(row.get("raw_text", "")),
-                    "url": str(row.get("url", "")),
-                }
-            )
-
-    items: list[dict[str, Any]] = []
-    for index, bucket in enumerate(
-        sorted(merged.values(), key=lambda item: (item["first_published_at"], item["title"])),
-        start=1,
-    ):
-        ordered_source_counts = dict(
-            sorted(bucket["source_counts"].items(), key=lambda item: (-item[1], item[0]))
-        )
-        items.append(
-            {
-                "item_id": f"I{index:05d}",
-                "title": bucket["title"],
-                "first_published_at": bucket["first_published_at"],
-                "last_published_at": bucket["last_published_at"],
-                "raw_count": bucket["raw_count"],
-                "source_counts": ordered_source_counts,
-                "representative_row": bucket["representative_row"],
-                "sample_rows": bucket["sample_rows"],
-            }
-        )
-    return items
+    return _news_selection_module().build_agent_candidate_items(rows)
 
 
 def _render_agent_rerank_chunk_markdown(
@@ -873,19 +632,7 @@ def _selection_for_wave(selection_payload: dict[str, Any], wave_id: str) -> dict
 
 
 def _build_timeline_rows(news_evidence: list[dict[str, Any]]) -> list[dict[str, str]]:
-    rows = []
-    ordered = sorted(news_evidence, key=lambda row: _to_naive_timestamp(row.get("published_at")))
-    for row in ordered[:DEFAULT_TIMELINE_NEWS_LIMIT]:
-        rows.append(
-            {
-                "time": _format_display_time(row.get("published_at", "")),
-                "category": "本地证据",
-                "event": str(row.get("title", "")),
-                "impact": _summarize_timeline_impact(str(row.get("raw_text", ""))),
-                "source": str(row.get("source_id", "")),
-            }
-        )
-    return rows
+    return _news_selection_module().build_timeline_rows(news_evidence, limit=DEFAULT_TIMELINE_NEWS_LIMIT)
 
 
 def _build_quant_rows(stock_bundle: dict[str, pd.DataFrame]) -> list[dict[str, str]]:
@@ -1006,91 +753,11 @@ def _select_top_waves(waves: list[dict[str, Any]], top_k: int = DEFAULT_TOP_WAVE
 
 
 def _build_wave_section_markdown(wave_section: dict[str, Any]) -> str:
-    raw_blocks = _render_news_raw_blocks(wave_section["news_rows"])
-    quant_table = _table(
-        ["维度", "数值", "证据", "解释"],
-        [[row["metric"], row["value"], row["evidence"], row["interpretation"]] for row in wave_section["quant_rows"]],
-    )
-    concept_table = _table(
-        ["概念", "代码", "区间涨幅", "收盘价相关系数", "日收益率相关系数", "解释"],
-        [
-            [
-                row["concept_name"],
-                row["concept_code"],
-                row["period_return_pct"],
-                row["close_corr"],
-                row["ret_corr"],
-                row["interpretation"],
-            ]
-            for row in wave_section["concept_rows"]
-        ],
-    )
-    conclusion_table = _table(
-        ["维度", "结论", "置信度", "说明"],
-        [[row["dimension"], row["value"], row["confidence"], row["notes"]] for row in wave_section["conclusion_rows"]],
-    )
-    final_verdict = wave_section.get("final_verdict", {})
-    final_verdict_lines = []
-    if final_verdict:
-        final_verdict_lines.extend(
-            [
-                "## 综合裁决",
-                "",
-                f"- 主因：`{final_verdict.get('main_cause', '')}`",
-                f"- 备选：`{final_verdict.get('alt_cause', '')}`",
-                f"- 最终判定：{_display_final_judgment(final_verdict.get('final_judgment', ''))}",
-                f"- 说明：{final_verdict.get('notes', '')}",
-                f"- 置信度：`{final_verdict.get('confidence', '')}`",
-            ]
-        )
-
-    return f"""# 波段 {wave_section['wave_id']}
-
-- 区间：`{_format_wave_period(wave_section)}`
-- 涨幅：`{wave_section['gain_pct']}`
-- 波段审查：`{wave_section['review']}`
-- 粗排新闻来源分布：`{_format_news_source_distribution(wave_section.get("rough_news_rows", wave_section["news_rows"]))}`
-- 一句话逻辑：`{wave_section.get('one_line_logic', '')}`
-
-## 证据原文
-
-{raw_blocks}
-
-## 量价验证表
-
-{quant_table}
-
-## 概念联动验证表
-
-{concept_table}
-
-## 结论与置信度表
-
-{conclusion_table}
-
-{chr(10).join(final_verdict_lines)}
-"""
+    return _report_rendering_module().build_wave_section_markdown(wave_section)
 
 
 def render_detailed_markdown(payload: dict[str, Any]) -> str:
-    wave_sections = "\n\n".join(_build_wave_section_markdown(wave) for wave in payload["wave_sections"])
-    return f"""# {payload['stock_name']}波段归因
-
-## 基础信息
-
-- 标的名称：{payload['stock_name']}
-- 股票代码：`{payload['ts_code']}`
-- 分析窗口：`{payload['start_date']}` 到 `{payload['end_date']}`
-- 报告时间：`{payload.get('report_time', '')}`
-- 分析波段数：`{len(payload.get('wave_sections', []))}`
-- 一句话逻辑：`{payload.get('one_line_logic', '')}`
-
-波段图：
-
-![]({payload['plot_relpath']})
-
-{wave_sections}
-"""
+    return _report_rendering_module().render_detailed_markdown(payload)
 
 
 def run_stock_wave_attribution(
@@ -1106,6 +773,8 @@ def run_stock_wave_attribution(
     plotter: Callable[..., dict[str, Any]] = _default_plotter,
     chatgpt_runner: Callable[..., str] = run_chatgpt_browser,
     use_chatgpt: bool | None = None,
+    skip_concept: bool = False,
+    news_lookback_days: int = DEFAULT_NEWS_LOOKBACK_DAYS,
 ) -> dict[str, Any]:
     _require_pandas()
     report_dir, plot_dir = _resolve_output_paths(output_root, analysis_dir=analysis_dir, plot_dir=plot_dir)
@@ -1145,6 +814,7 @@ def run_stock_wave_attribution(
             sample_label=case_context.get("sample_label", ""),
             concept_labels=concept_labels,
             waves=[wave],
+            lookback_days=news_lookback_days,
         )
         selected_news = _select_news_evidence(
             news_evidence=news_evidence,
@@ -1153,12 +823,14 @@ def run_stock_wave_attribution(
             concept_labels=concept_labels,
             waves=[wave],
             top_k=DEFAULT_EVIDENCE_NEWS_LIMIT,
+            lookback_days=news_lookback_days,
         )
         local_verdict = _build_local_verdict(
             case_context=case_context,
             selected_news=selected_news,
             concept_rows=concept_rows,
             quant_rows=quant_rows,
+            skip_concept=skip_concept,
         )
 
         review = "rule_based"
@@ -1220,6 +892,7 @@ def run_stock_wave_attribution(
                 "news_rows": selected_news,
                 "quant_rows": quant_rows,
                 "concept_rows": concept_rows,
+                "skip_concept": skip_concept,
                 "conclusion_rows": conclusion_rows,
                 "final_verdict": final_verdict,
             }
@@ -1262,6 +935,7 @@ def prepare_agent_rerank_task(
     rerank_root: Path,
     task_id: str,
     segmenter: Callable[[pd.DataFrame], list[dict[str, Any]]] | None = None,
+    news_lookback_days: int = DEFAULT_NEWS_LOOKBACK_DAYS,
 ) -> dict[str, Any]:
     _require_pandas()
     rerank_root.mkdir(parents=True, exist_ok=True)
@@ -1283,7 +957,11 @@ def prepare_agent_rerank_task(
     for wave in waves:
         wave_id = str(wave["wave_id"])
         wave_dir = rerank_root / wave_id
-        rough_rows = _collect_wave_news_rows(news_evidence=news_evidence, waves=[wave])
+        rough_rows = _collect_wave_news_rows(
+            news_evidence=news_evidence,
+            waves=[wave],
+            lookback_days=news_lookback_days,
+        )
         candidates = _build_agent_candidate_items(rough_rows)
         wave_summary = _write_agent_wave_artifacts(
             wave_dir=wave_dir,
@@ -1329,6 +1007,8 @@ def finalize_agent_rerank_task(
     plot_dir: Path | None = None,
     segmenter: Callable[[pd.DataFrame], list[dict[str, Any]]] | None = None,
     plotter: Callable[..., dict[str, Any]] = _default_plotter,
+    skip_concept: bool = False,
+    news_lookback_days: int = DEFAULT_NEWS_LOOKBACK_DAYS,
 ) -> dict[str, Any]:
     _require_pandas()
     selection_payload = json.loads(selection_path.read_text(encoding="utf-8"))
@@ -1377,6 +1057,7 @@ def finalize_agent_rerank_task(
             selected_news=selected_news,
             concept_rows=concept_rows,
             quant_rows=quant_rows,
+            skip_concept=skip_concept,
         )
 
         one_line_logic = str(
@@ -1386,7 +1067,11 @@ def finalize_agent_rerank_task(
         ).strip()
         if one_line_logic and not one_line_logic.endswith("。"):
             one_line_logic = f"{one_line_logic}。"
-        rough_rows = _collect_wave_news_rows(news_evidence=news_evidence, waves=[wave])
+        rough_rows = _collect_wave_news_rows(
+            news_evidence=news_evidence,
+            waves=[wave],
+            lookback_days=news_lookback_days,
+        )
         wave_sections.append(
             {
                 "wave_id": wave_id,
@@ -1400,6 +1085,7 @@ def finalize_agent_rerank_task(
                 "news_rows": selected_news,
                 "quant_rows": quant_rows,
                 "concept_rows": concept_rows,
+                "skip_concept": skip_concept,
                 "conclusion_rows": local_verdict["conclusion_rows"],
                 "final_verdict": local_verdict["final_verdict"],
             }
@@ -1437,6 +1123,8 @@ def run_local_attribution_task(
     start_date: str,
     end_date: str,
     sample_label: str,
+    skip_concept: bool = False,
+    news_lookback_days: int = DEFAULT_NEWS_LOOKBACK_DAYS,
     config_path: str | Path | None = None,
     db_connect: Callable[..., Any] | None = None,
     stock_bundle_fetcher: Callable[..., dict[str, pd.DataFrame]] = _fetch_stock_window_bundle,
@@ -1466,7 +1154,8 @@ def run_local_attribution_task(
             akshare_stock_bundle_fetcher=akshare_stock_bundle_fetcher,
             quant_bundle_persister=quant_bundle_persister,
         )
-        concept_frames, concept_labels = _ensure_stock_concept_bundle(
+        concept_frames, concept_labels = _load_stock_concept_bundle(
+            skip_concept=skip_concept,
             conn=quant_conn,
             ts_code=ts_code,
             start_date=start_date,
@@ -1497,6 +1186,8 @@ def run_local_attribution_task(
         analysis_dir=Path(runtime["paths"]["analysis_dir"]),
         plot_dir=Path(runtime["paths"]["plot_dir"]),
         use_chatgpt=bool(runtime.get("chatgpt", {}).get("enabled", False)),
+        skip_concept=skip_concept,
+        news_lookback_days=news_lookback_days,
     )
 
 
@@ -1508,6 +1199,8 @@ def run_local_prepare_agent_rerank_task(
     end_date: str,
     sample_label: str,
     task_id: str,
+    skip_concept: bool = False,
+    news_lookback_days: int = DEFAULT_NEWS_LOOKBACK_DAYS,
     config_path: str | Path | None = None,
     db_connect: Callable[..., Any] | None = None,
     stock_bundle_fetcher: Callable[..., dict[str, pd.DataFrame]] = _fetch_stock_window_bundle,
@@ -1536,7 +1229,8 @@ def run_local_prepare_agent_rerank_task(
             akshare_stock_bundle_fetcher=akshare_stock_bundle_fetcher,
             quant_bundle_persister=quant_bundle_persister,
         )
-        concept_frames, concept_labels = _ensure_stock_concept_bundle(
+        concept_frames, concept_labels = _load_stock_concept_bundle(
+            skip_concept=skip_concept,
             conn=quant_conn,
             ts_code=ts_code,
             start_date=start_date,
@@ -1567,6 +1261,7 @@ def run_local_prepare_agent_rerank_task(
         concept_labels=concept_labels,
         rerank_root=rerank_root,
         task_id=task_id,
+        news_lookback_days=news_lookback_days,
     )
 
 
@@ -1579,6 +1274,8 @@ def run_local_finalize_agent_rerank_task(
     sample_label: str,
     task_id: str,
     selection_path: str | Path,
+    skip_concept: bool = False,
+    news_lookback_days: int = DEFAULT_NEWS_LOOKBACK_DAYS,
     config_path: str | Path | None = None,
     db_connect: Callable[..., Any] | None = None,
     stock_bundle_fetcher: Callable[..., dict[str, pd.DataFrame]] = _fetch_stock_window_bundle,
@@ -1607,7 +1304,8 @@ def run_local_finalize_agent_rerank_task(
             akshare_stock_bundle_fetcher=akshare_stock_bundle_fetcher,
             quant_bundle_persister=quant_bundle_persister,
         )
-        concept_frames, concept_labels = _ensure_stock_concept_bundle(
+        concept_frames, concept_labels = _load_stock_concept_bundle(
+            skip_concept=skip_concept,
             conn=quant_conn,
             ts_code=ts_code,
             start_date=start_date,
@@ -1640,6 +1338,8 @@ def run_local_finalize_agent_rerank_task(
         selection_path=Path(selection_path),
         analysis_dir=Path(runtime["paths"]["analysis_dir"]),
         plot_dir=Path(runtime["paths"]["plot_dir"]),
+        skip_concept=skip_concept,
+        news_lookback_days=news_lookback_days,
     )
 
 
@@ -1650,6 +1350,8 @@ def _build_run_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-date", required=True)
     parser.add_argument("--end-date", required=True)
     parser.add_argument("--sample-label", required=True)
+    parser.add_argument("--news-lookback-days", type=int, default=DEFAULT_NEWS_LOOKBACK_DAYS)
+    parser.add_argument("--skip-concept", action="store_true", help="显式跳过概念联动数据")
     parser.add_argument("--config", default=None)
     return parser
 
@@ -1662,6 +1364,8 @@ def _build_prepare_agent_rerank_parser() -> argparse.ArgumentParser:
     parser.add_argument("--end-date", required=True)
     parser.add_argument("--sample-label", required=True)
     parser.add_argument("--task-id", required=True)
+    parser.add_argument("--news-lookback-days", type=int, default=DEFAULT_NEWS_LOOKBACK_DAYS)
+    parser.add_argument("--skip-concept", action="store_true", help="显式跳过概念联动数据")
     parser.add_argument("--config", default=None)
     return parser
 
@@ -1675,6 +1379,8 @@ def _build_finalize_agent_rerank_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample-label", required=True)
     parser.add_argument("--task-id", required=True)
     parser.add_argument("--selection-path", required=True)
+    parser.add_argument("--news-lookback-days", type=int, default=DEFAULT_NEWS_LOOKBACK_DAYS)
+    parser.add_argument("--skip-concept", action="store_true", help="显式跳过概念联动数据")
     parser.add_argument("--config", default=None)
     return parser
 
@@ -1771,6 +1477,40 @@ def _ensure_stock_concept_bundle(
     return concept_frames, concept_labels
 
 
+def _load_stock_concept_bundle(
+    *,
+    skip_concept: bool,
+    conn,
+    ts_code: str,
+    start_date: str,
+    end_date: str,
+    concept_fetcher: Callable[..., tuple[dict[str, pd.DataFrame], dict[str, dict[str, str]]]],
+    tushare_concept_bundle_fetcher: Callable[..., dict[str, pd.DataFrame]] | None,
+    concept_bundle_persister: Callable[..., None] | None,
+    tushare_token: str,
+    tushare_http_url: str,
+) -> tuple[dict[str, pd.DataFrame], dict[str, dict[str, str]]]:
+    if skip_concept:
+        logger.info(
+            "显式跳过概念联动数据: ts_code=%s start_date=%s end_date=%s",
+            ts_code,
+            start_date,
+            end_date,
+        )
+        return {}, {}
+    return _ensure_stock_concept_bundle(
+        conn=conn,
+        ts_code=ts_code,
+        start_date=start_date,
+        end_date=end_date,
+        concept_fetcher=concept_fetcher,
+        tushare_concept_bundle_fetcher=tushare_concept_bundle_fetcher,
+        concept_bundle_persister=concept_bundle_persister,
+        tushare_token=tushare_token,
+        tushare_http_url=tushare_http_url,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = argv or sys.argv[1:]
     if not argv or argv[0] in {"-h", "--help", "help"}:
@@ -1778,9 +1518,9 @@ def main(argv: list[str] | None = None) -> int:
             "Usage:\n"
             "  orchestrator.py deps\n"
             "  orchestrator.py contract-path\n"
-            "  orchestrator.py run --stock-name 名称 --ts-code 代码 --start-date YYYY-MM-DD --end-date YYYY-MM-DD --sample-label 标签 [--config 路径]\n"
-            "  orchestrator.py prepare-agent-rerank --stock-name 名称 --ts-code 代码 --start-date YYYY-MM-DD --end-date YYYY-MM-DD --sample-label 标签 --task-id 任务ID [--config 路径]\n"
-            "  orchestrator.py finalize-agent-rerank --stock-name 名称 --ts-code 代码 --start-date YYYY-MM-DD --end-date YYYY-MM-DD --sample-label 标签 --task-id 任务ID --selection-path 路径 [--config 路径]\n"
+            "  orchestrator.py run --stock-name 名称 --ts-code 代码 --start-date YYYY-MM-DD --end-date YYYY-MM-DD --sample-label 标签 [--news-lookback-days 天数] [--skip-concept] [--config 路径]\n"
+            "  orchestrator.py prepare-agent-rerank --stock-name 名称 --ts-code 代码 --start-date YYYY-MM-DD --end-date YYYY-MM-DD --sample-label 标签 --task-id 任务ID [--news-lookback-days 天数] [--skip-concept] [--config 路径]\n"
+            "  orchestrator.py finalize-agent-rerank --stock-name 名称 --ts-code 代码 --start-date YYYY-MM-DD --end-date YYYY-MM-DD --sample-label 标签 --task-id 任务ID --selection-path 路径 [--news-lookback-days 天数] [--skip-concept] [--config 路径]\n"
         )
         return 0
     if argv[0] == "deps":
@@ -1798,6 +1538,8 @@ def main(argv: list[str] | None = None) -> int:
             start_date=args.start_date,
             end_date=args.end_date,
             sample_label=args.sample_label,
+            news_lookback_days=args.news_lookback_days,
+            skip_concept=args.skip_concept,
             config_path=args.config,
         )
         print(json.dumps(result, ensure_ascii=False))
@@ -1812,6 +1554,8 @@ def main(argv: list[str] | None = None) -> int:
             end_date=args.end_date,
             sample_label=args.sample_label,
             task_id=args.task_id,
+            news_lookback_days=args.news_lookback_days,
+            skip_concept=args.skip_concept,
             config_path=args.config,
         )
         print(json.dumps(result, ensure_ascii=False))
@@ -1827,6 +1571,8 @@ def main(argv: list[str] | None = None) -> int:
             sample_label=args.sample_label,
             task_id=args.task_id,
             selection_path=args.selection_path,
+            news_lookback_days=args.news_lookback_days,
+            skip_concept=args.skip_concept,
             config_path=args.config,
         )
         print(json.dumps(result, ensure_ascii=False))

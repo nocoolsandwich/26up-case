@@ -27,7 +27,7 @@
    - `skills/chatgpt-plus-browser/`：ChatGPT 网页自动化运行时
    - `skills/stock-wave-attribution/`：单票波段归因 orchestrator 与报告契约
 5. 产出层
-   - `docs/analysis/`：正式分析报告
+   - `outputs/analysis/`：正式分析报告
    - `data/plots/`：K 线与波段配图
    - `data/`：榜单、中间产物、缓存与数据库备份
 

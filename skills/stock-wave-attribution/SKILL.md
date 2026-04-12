@@ -44,7 +44,7 @@ python3 skills/stock-wave-attribution/scripts/project_skill.py summary --json
 
 - 波段切分、绘图、量价验证辅助函数一起进入 skill runtime
 - 波段审查与归因编排默认收口为本地数据库与规则链路
-- 报告继续输出到 `docs/analysis/`
+- 报告继续输出到 `outputs/analysis/`
 - 配图继续输出到 `data/plots/`
 - PostgreSQL 与 `tushare` 配置默认从 `stock-wave-attribution.yaml` 读取
 - 详细表格合同固定在：

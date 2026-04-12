@@ -20,6 +20,8 @@ class AttributionTask:
     start_date: str
     end_date: str
     sample_label: str
+    news_lookback_days: int = 14
+    skip_concept: bool = False
     status: TaskStatus = TaskStatus.QUEUED
     stage: str = "created"
     report_path: str = ""
@@ -31,13 +33,15 @@ class AttributionTask:
     last_command: str = ""
     error: str = ""
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
         payload["status"] = self.status.value
         return payload
 
     @classmethod
-    def from_dict(cls, payload: dict[str, str]) -> AttributionTask:
+    def from_dict(cls, payload: dict[str, object]) -> AttributionTask:
         data = dict(payload)
         data["status"] = TaskStatus(data.get("status", TaskStatus.QUEUED))
+        data["news_lookback_days"] = int(data.get("news_lookback_days", 14))
+        data["skip_concept"] = bool(data.get("skip_concept", False))
         return cls(**data)

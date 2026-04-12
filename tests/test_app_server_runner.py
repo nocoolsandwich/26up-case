@@ -240,7 +240,7 @@ def test_run_app_server_task_completes_and_records_requests_progress_and_log(tmp
     assert "finalize-agent-rerank" in requests[2]["params"]["input"][0]["text"]
     assert "100 选 3-5" in requests[2]["params"]["input"][0]["text"]
     assert "不要逐条打分" in requests[2]["params"]["input"][0]["text"]
-    assert "正式报告必须落到 docs/analysis" in requests[2]["params"]["input"][0]["text"]
+    assert "正式报告必须落到 outputs/analysis" in requests[2]["params"]["input"][0]["text"]
     assert captured_kwargs["env"]["HTTP_PROXY"] == "http://127.0.0.1:7897"
     assert captured_kwargs["env"]["HTTPS_PROXY"] == "http://127.0.0.1:7897"
     assert captured_kwargs["env"]["ALL_PROXY"] == "http://127.0.0.1:7897"

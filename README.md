@@ -20,7 +20,7 @@
 ## 快速事实
 
 - 当前数据库主线为本机 PostgreSQL 16，承载 `event_news` 和 `event_quant`
-- 正式分析输出在 [docs/analysis](./docs/analysis/)
+- 正式分析输出在 [outputs/analysis](./outputs/analysis/)
 - 项目内 skills 采用“项目优先”口径
 - 单票波段归因主入口是 [skills/stock-wave-attribution/SKILL.md](./skills/stock-wave-attribution/SKILL.md)
 - `stock-wave-attribution` 默认配置文件是 [skills/stock-wave-attribution/stock-wave-attribution.yaml](./skills/stock-wave-attribution/stock-wave-attribution.yaml)
@@ -47,7 +47,7 @@
 - 本机归因服务：
   - [service](./service/)
 - 正式分析结果：
-  - [docs/analysis](./docs/analysis/)
+  - [outputs/analysis](./outputs/analysis/)
 
 ## 最短恢复
 

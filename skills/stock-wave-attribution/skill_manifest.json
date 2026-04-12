@@ -37,7 +37,7 @@
     "chatgpt-plus-browser"
   ],
   "output_targets": [
-    "docs/analysis",
+    "outputs/analysis",
     "data/plots"
   ],
   "planned_capabilities": [
@@ -48,7 +48,7 @@
   ],
   "migration_boundary": {
     "keep_in_project": [
-      "docs/analysis/"
+      "outputs/analysis/"
     ],
     "move_into_skill": [
       "runtime config loading",

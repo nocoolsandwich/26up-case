@@ -13,6 +13,14 @@ WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CODEX_TIMEOUT_SECONDS = 900
 
 
+def _append_optional_task_flags(parts: list[str], task: AttributionTask) -> list[str]:
+    if task.news_lookback_days > 0:
+        parts.extend(["--news-lookback-days", str(task.news_lookback_days)])
+    if task.skip_concept:
+        parts.append("--skip-concept")
+    return parts
+
+
 def build_codex_base_instructions() -> str:
     return (
         "你正在执行 case_data 的单票波段归因服务任务。"
@@ -38,21 +46,24 @@ def build_codex_developer_instructions() -> str:
 
 def build_skill_run_command(task: AttributionTask) -> str:
     return shlex.join(
-        [
-            "python",
-            "skills/stock-wave-attribution/scripts/orchestrator.py",
-            "run",
-            "--stock-name",
-            task.stock_name,
-            "--ts-code",
-            task.ts_code,
-            "--start-date",
-            task.start_date,
-            "--end-date",
-            task.end_date,
-            "--sample-label",
-            task.sample_label,
-        ]
+        _append_optional_task_flags(
+            [
+                "python",
+                "skills/stock-wave-attribution/scripts/orchestrator.py",
+                "run",
+                "--stock-name",
+                task.stock_name,
+                "--ts-code",
+                task.ts_code,
+                "--start-date",
+                task.start_date,
+                "--end-date",
+                task.end_date,
+                "--sample-label",
+                task.sample_label,
+            ],
+            task,
+        )
     )
 
 
@@ -62,47 +73,53 @@ def _agent_rerank_root(task: AttributionTask) -> Path:
 
 def build_prepare_agent_rerank_command(task: AttributionTask) -> str:
     return shlex.join(
-        [
-            "python",
-            "skills/stock-wave-attribution/scripts/orchestrator.py",
-            "prepare-agent-rerank",
-            "--stock-name",
-            task.stock_name,
-            "--ts-code",
-            task.ts_code,
-            "--start-date",
-            task.start_date,
-            "--end-date",
-            task.end_date,
-            "--sample-label",
-            task.sample_label,
-            "--task-id",
-            task.task_id,
-        ]
+        _append_optional_task_flags(
+            [
+                "python",
+                "skills/stock-wave-attribution/scripts/orchestrator.py",
+                "prepare-agent-rerank",
+                "--stock-name",
+                task.stock_name,
+                "--ts-code",
+                task.ts_code,
+                "--start-date",
+                task.start_date,
+                "--end-date",
+                task.end_date,
+                "--sample-label",
+                task.sample_label,
+                "--task-id",
+                task.task_id,
+            ],
+            task,
+        )
     )
 
 
 def build_finalize_agent_rerank_command(task: AttributionTask) -> str:
     return shlex.join(
-        [
-            "python",
-            "skills/stock-wave-attribution/scripts/orchestrator.py",
-            "finalize-agent-rerank",
-            "--stock-name",
-            task.stock_name,
-            "--ts-code",
-            task.ts_code,
-            "--start-date",
-            task.start_date,
-            "--end-date",
-            task.end_date,
-            "--sample-label",
-            task.sample_label,
-            "--task-id",
-            task.task_id,
-            "--selection-path",
-            str(_agent_rerank_root(task) / "final_selection.json"),
-        ]
+        _append_optional_task_flags(
+            [
+                "python",
+                "skills/stock-wave-attribution/scripts/orchestrator.py",
+                "finalize-agent-rerank",
+                "--stock-name",
+                task.stock_name,
+                "--ts-code",
+                task.ts_code,
+                "--start-date",
+                task.start_date,
+                "--end-date",
+                task.end_date,
+                "--sample-label",
+                task.sample_label,
+                "--task-id",
+                task.task_id,
+                "--selection-path",
+                str(_agent_rerank_root(task) / "final_selection.json"),
+            ],
+            task,
+        )
     )
 
 
@@ -144,10 +161,12 @@ def build_codex_prompt(task: AttributionTask) -> str:
         f"- 标的：{task.stock_name}（{task.ts_code}）\n"
         f"- 分析窗口：{task.start_date} 到 {task.end_date}\n"
         f"- 样本标签：{task.sample_label}\n"
+        f"- 新闻窗口：波段起点前 {task.news_lookback_days} 天到波段结束\n"
+        f"- 概念联动：{'已显式跳过，本次允许概念表为空' if task.skip_concept else '正常启用'}\n"
         "- 使用本地 PostgreSQL 的 event_quant / event_news，与正式报告链路一致。\n"
         "- 粗排标准：100 选 3-5。\n"
         "- 精选标准：从粗排并集里直接精选最终 10 条，不做逐条打分。\n"
-        "- 正式报告必须落到 docs/analysis，并生成配图到 data/plots。\n"
+        "- 正式报告必须落到 outputs/analysis，并生成配图到 data/plots。\n"
         "- 如果命令失败，再只阅读最小必要文件定位原因，不要先做开放式探索。\n"
     )
 

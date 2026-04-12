@@ -19,6 +19,8 @@ class CreateTaskRequest(BaseModel):
     start_date: str
     end_date: str
     sample_label: str
+    news_lookback_days: int = 14
+    skip_concept: bool = False
 
 
 def create_app(
@@ -64,7 +66,7 @@ def create_app(
         return read_datastore_health()
 
     @app.post("/tasks/attribution")
-    def create_task(request: CreateTaskRequest) -> dict[str, str]:
+    def create_task(request: CreateTaskRequest) -> dict[str, object]:
         task = AttributionTask(
             task_id=f"attr-{uuid4()}",
             stock_name=request.stock_name,
@@ -72,12 +74,14 @@ def create_app(
             start_date=request.start_date,
             end_date=request.end_date,
             sample_label=request.sample_label,
+            news_lookback_days=request.news_lookback_days,
+            skip_concept=request.skip_concept,
         )
         task_store.save_task(task)
         return task.to_dict()
 
     @app.get("/tasks/{task_id}")
-    def get_task(task_id: str) -> dict[str, str]:
+    def get_task(task_id: str) -> dict[str, object]:
         try:
             task = task_store.load_task(task_id)
         except FileNotFoundError as exc:
@@ -93,7 +97,7 @@ def create_app(
         return locate_task_result(task, workspace_root=resolved_workspace_root)
 
     @app.post("/tasks/{task_id}/run")
-    def run_task(task_id: str) -> dict[str, str]:
+    def run_task(task_id: str) -> dict[str, object]:
         try:
             task = task_store.load_task(task_id)
         except FileNotFoundError as exc:
@@ -112,7 +116,7 @@ def create_app(
         return updated.to_dict()
 
     @app.post("/tasks/{task_id}/retry-chatgpt")
-    def retry_chatgpt(task_id: str) -> dict[str, str]:
+    def retry_chatgpt(task_id: str) -> dict[str, object]:
         try:
             task_store.load_task(task_id)
         except FileNotFoundError as exc:
